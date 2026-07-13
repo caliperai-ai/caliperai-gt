@@ -1,0 +1,27 @@
+# This project runs entirely in Linux containers. Force LF line endings on
+# checkout so a Windows clone (default core.autocrlf=true) doesn't corrupt shell
+# scripts / container entrypoints with CRLF, which would break the shebang and
+# make containers (e.g. the frontend nginx entrypoint) fail to start.
+* text=auto eol=lf
+
+# Be explicit for files executed inside containers / by the shell.
+*.sh          text eol=lf
+*.conf        text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+Dockerfile*   text eol=lf
+.env.example  text eol=lf
+
+# Binary assets — never normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.pcd binary
+*.bin binary
+*.npy binary
+*.pt binary
+*.woff binary
+*.woff2 binary
