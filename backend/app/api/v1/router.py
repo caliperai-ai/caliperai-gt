@@ -1,0 +1,180 @@
+"""
+API v1 Router - Aggregates all endpoint routers.
+"""
+from fastapi import APIRouter
+
+from app.api.v1.endpoints import (
+    analytics,
+    auth,
+    campaigns,
+    chat,
+    datasets,
+    scenes,
+    tasks,
+    annotations,
+    annotations_4d,
+    annotations_3d,
+    annotations_fusion,
+    annotations_2d,
+    tracks_2d,
+    frames,
+    users,
+    taxonomies,
+    import_data,
+    import_annotations,
+    data,
+    sam2,
+    qa,
+    workflow,
+    dataops,
+    export,
+    gcs,
+    organizations,
+    efficiency,
+    knowledge,
+    sso,
+    segmentation,
+)
+
+api_router = APIRouter()
+
+api_router.include_router(
+    organizations.router,
+    tags=["organizations"],
+)
+api_router.include_router(
+    auth.router,
+    prefix="/auth",
+    tags=["auth"],
+)
+api_router.include_router(
+    sso.router,
+    prefix="/auth/sso",
+    tags=["auth", "sso"],
+)
+api_router.include_router(
+    campaigns.router,
+    prefix="/campaigns",
+    tags=["campaigns"],
+)
+api_router.include_router(
+    datasets.router,
+    prefix="/datasets",
+    tags=["datasets"],
+)
+api_router.include_router(
+    taxonomies.router,
+    prefix="/taxonomies",
+    tags=["taxonomies"],
+)
+api_router.include_router(
+    scenes.router,
+    prefix="/scenes",
+    tags=["scenes"],
+)
+api_router.include_router(
+    tasks.router,
+    prefix="/tasks",
+    tags=["tasks"],
+)
+api_router.include_router(
+    annotations.router,
+    prefix="/annotations",
+    tags=["annotations"],
+)
+api_router.include_router(
+    annotations_4d.router,
+    tags=["annotations-4d"],
+)
+api_router.include_router(
+    annotations_3d.router,
+    tags=["annotations-3d"],
+)
+api_router.include_router(
+    annotations_fusion.router,
+    tags=["annotations-fusion"],
+)
+api_router.include_router(
+    annotations_2d.router,
+    tags=["annotations-2d"],
+)
+api_router.include_router(
+    tracks_2d.router,
+    tags=["tracks-2d"],
+)
+api_router.include_router(
+    frames.router,
+    prefix="/frames",
+    tags=["frames"],
+)
+api_router.include_router(
+    users.router,
+    prefix="/users",
+    tags=["users"],
+)
+api_router.include_router(
+    import_data.router,
+    prefix="/import",
+    tags=["import"],
+)
+api_router.include_router(
+    import_annotations.router,
+    prefix="/import",
+    tags=["import-annotations"],
+)
+api_router.include_router(
+    data.router,
+    prefix="/data",
+    tags=["data"],
+)
+api_router.include_router(
+    sam2.router,
+    tags=["sam2"],
+)
+api_router.include_router(
+    qa.router,
+    tags=["qa"],
+)
+api_router.include_router(
+    workflow.router,
+    tags=["workflow"],
+)
+api_router.include_router(
+    dataops.router,
+    tags=["dataops"],
+)
+api_router.include_router(
+    export.router,
+    prefix="/export",
+    tags=["export"],
+)
+api_router.include_router(
+    gcs.router,
+    prefix="/gcs",
+    tags=["gcs"],
+)
+api_router.include_router(
+    analytics.router,
+    prefix="/analytics",
+    tags=["analytics"],
+)
+api_router.include_router(
+    efficiency.router,
+    prefix="/efficiency",
+    tags=["efficiency"],
+)
+api_router.include_router(
+    chat.router,
+    prefix="/chat",
+    tags=["chat"],
+)
+api_router.include_router(
+    knowledge.router,
+    prefix="/knowledge",
+    tags=["knowledge"],
+)
+api_router.include_router(
+    segmentation.router,
+    prefix="/segmentation",
+    tags=["segmentation"],
+)

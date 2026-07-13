@@ -1,0 +1,81 @@
+# Production GPU Override for SAM2 Service
+# Use with: docker compose -f docker-compose.prod.yml -f docker-compose.prod.gpu.yml up -d
+
+services:
+  # ==========================================================================
+  # SAM2 GPU Service - Production Configuration
+  # ==========================================================================
+  sam2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.sam2
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: calipergt-sam2:${VERSION:-latest}
+    container_name: anno-sam2
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    shm_size: '8gb'
+    environment:
+      - SAM2_MODEL_SIZE=${SAM2_MODEL_SIZE:-large}
+      - SAM2_DEVICE=cuda
+      - SAM2_MODEL_DIR=/models/sam2
+      - PYTHONUNBUFFERED=1
+      - PYTORCH_JIT=0
+    expose:
+      - "8001"
+    volumes:
+      - ./models/sam2:/models/sam2:ro
+    networks:
+      - anno-internal
+    deploy:
+      resources:
+        limits:
+          cpus: "${SAM2_CPU_LIMIT:-8}"
+          memory: ${SAM2_MEMORY_LIMIT:-16G}
+        reservations:
+          cpus: "1"
+          memory: 4G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 30s
+      retries: 10
+      start_period: 300s
+
+  # Override backend to connect to SAM2 service
+  backend:
+    environment:
+      - SAM2_MODE=api
+      - SAM2_API_URL=http://sam2:8001
+    depends_on:
+      sam2:
+        condition: service_healthy
+
+  # ==========================================================================
+  # Ollama GPU Service - Production Configuration (AI Chatbot)
+  # ==========================================================================
+  ollama:
+    # Override the CPU service with GPU support
+    deploy:
+      resources:
+        limits:
+          cpus: "${OLLAMA_CPU_LIMIT:-8}"
+          memory: ${OLLAMA_MEMORY_LIMIT:-24G}
+        reservations:
+          cpus: "2"
+          memory: 12G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

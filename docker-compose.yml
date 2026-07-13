@@ -1,0 +1,243 @@
+# Sensor Fusion Annotation Platform - Docker Compose
+
+services:
+  # ==========================================================================
+  # Backend API Service
+  # ==========================================================================
+  backend:
+    build:
+      context: ./backend
+      target: ${BUILD_TARGET:-production}
+    container_name: anno-backend
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/annotation_platform
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      - OBJECT_STORAGE_ENDPOINT=${OBJECT_STORAGE_ENDPOINT:-http://minio:9000}
+      - OBJECT_STORAGE_ACCESS_KEY=${OBJECT_STORAGE_ACCESS_KEY}
+      - OBJECT_STORAGE_SECRET_KEY=${OBJECT_STORAGE_SECRET_KEY}
+      - OBJECT_STORAGE_BUCKET=${OBJECT_STORAGE_BUCKET:-annotation-data}
+      - OBJECT_STORAGE_PRESIGN_TTL=${OBJECT_STORAGE_PRESIGN_TTL:-900}
+      # ── Internal-service TLS (disabled by default in dev; set in .env to enable) ──
+      # PostgreSQL TLS
+      - DB_SSL_MODE=${DB_SSL_MODE:-disable}
+      - DB_SSL_CA=${DB_SSL_CA:-}
+      - DB_SSL_CERT=${DB_SSL_CERT:-}
+      - DB_SSL_KEY=${DB_SSL_KEY:-}
+      # Redis TLS
+      - REDIS_TLS_ENABLED=${REDIS_TLS_ENABLED:-false}
+      - REDIS_TLS_CA=${REDIS_TLS_CA:-}
+      # MinIO TLS
+      - MINIO_TLS_CA=${MINIO_TLS_CA:-}
+      - MINIO_TLS_VERIFY=${MINIO_TLS_VERIFY:-true}
+      - DATA_ROOT=/data
+      - SAM2_MODE=${SAM2_MODE:-mock}
+      - SAM2_API_URL=${SAM2_API_URL:-http://sam2:8001}
+      # AI Chatbot configuration
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-mistral:7b-instruct}
+      # RAG Knowledge Base configuration
+      - RAG_ENABLED=${RAG_ENABLED:-true}
+      - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-nomic-embed-text}
+      - RAG_EMBEDDING_DIMENSIONS=${RAG_EMBEDDING_DIMENSIONS:-768}
+      - RAG_TOP_K=${RAG_TOP_K:-5}
+      - RAG_SIMILARITY_THRESHOLD=${RAG_SIMILARITY_THRESHOLD:-0.3}
+      - RAG_REINDEX_ON_STARTUP=${RAG_REINDEX_ON_STARTUP:-true}
+      # SSO / OIDC (set values in .env to enable; leave blank to disable)
+      - SSO_REDIRECT_BASE_URL=${SSO_REDIRECT_BASE_URL:-http://localhost:3000}
+      - SSO_FRONTEND_URL=${SSO_FRONTEND_URL:-http://localhost:3000}
+      - SSO_DEFAULT_ROLE=${SSO_DEFAULT_ROLE:-annotator}
+      - SSO_EMAIL_DOMAIN_ORG_MAP=${SSO_EMAIL_DOMAIN_ORG_MAP:-}
+      - SSO_GOOGLE_CLIENT_ID=${SSO_GOOGLE_CLIENT_ID:-}
+      - SSO_GOOGLE_CLIENT_SECRET=${SSO_GOOGLE_CLIENT_SECRET:-}
+      - SSO_AZURE_CLIENT_ID=${SSO_AZURE_CLIENT_ID:-}
+      - SSO_AZURE_CLIENT_SECRET=${SSO_AZURE_CLIENT_SECRET:-}
+      - SSO_AZURE_TENANT_ID=${SSO_AZURE_TENANT_ID:-common}
+      - SSO_OKTA_CLIENT_ID=${SSO_OKTA_CLIENT_ID:-}
+      - SSO_OKTA_CLIENT_SECRET=${SSO_OKTA_CLIENT_SECRET:-}
+      - SSO_OKTA_DOMAIN=${SSO_OKTA_DOMAIN:-}
+      - SSO_KEYCLOAK_CLIENT_ID=${SSO_KEYCLOAK_CLIENT_ID:-}
+      - SSO_KEYCLOAK_CLIENT_SECRET=${SSO_KEYCLOAK_CLIENT_SECRET:-}
+      - SSO_KEYCLOAK_BASE_URL=${SSO_KEYCLOAK_BASE_URL:-}
+      - SSO_KEYCLOAK_REALM=${SSO_KEYCLOAK_REALM:-}
+      # --------------------------------------------------------------------------
+      # Encryption at rest – application-level Fernet (AC 3 & 4)
+      # Generate keys with:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      #   python -c "import secrets; print(secrets.token_hex(32))"
+      # Keys are injected from .env / secrets – never hard-coded here.
+      - FERNET_ENCRYPTION_KEY=${FERNET_ENCRYPTION_KEY:-}
+      - FERNET_ENCRYPTION_KEY_PREV=${FERNET_ENCRYPTION_KEY_PREV:-}
+      - FERNET_HMAC_KEY=${FERNET_HMAC_KEY:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app:delegated  # For development hot reload
+      - ./sample_data:/data:ro  # Mount sample data as read-only
+      - uploaded_data:/uploads  # Writable storage for uploaded datasets
+    networks:
+      - anno-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ==========================================================================
+  # Frontend Web Application
+  # ==========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      target: ${BUILD_TARGET:-production}
+      args:
+        BRAND: ${BRAND:-caliper}
+    container_name: anno-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+    networks:
+      - anno-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==========================================================================
+  # PostgreSQL Database with pgvector
+  # ==========================================================================
+  postgres:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.postgres
+    container_name: anno-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=annotation_platform
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-devpassword}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - anno-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d annotation_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # Redis Cache
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: anno-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - anno-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # MinIO Object Storage   (AC 2 – SSE-S3 server-side encryption)
+  # ==========================================================================
+  minio:
+    image: minio/minio:latest
+    container_name: anno-minio
+    restart: unless-stopped
+    # SSE-S3: MinIO encrypts every object with AES-256-GCM using the KMS master
+    # key defined in MINIO_KMS_SECRET_KEY.  Objects at rest on the volume are
+    # opaque ciphertext;  the key lives only in this environment variable (AC 4).
+    #
+    # Key format: "<key-name>:<32-byte-hex-string>"
+    # Generate:   python -c "import secrets; print('minio-sse-key:'+secrets.token_hex(32))"
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      # SSE-S3 – set MINIO_KMS_SECRET_KEY in .env or a Docker secret to enable
+      # built-in KMS and automatic object encryption.  Leave blank to disable.
+      - MINIO_KMS_SECRET_KEY=${MINIO_KMS_SECRET_KEY:-}
+      # Enforce SSE-S3 on every bucket (requires MINIO_KMS_SECRET_KEY to be set)
+      - MINIO_KMS_AUTO_ENCRYPTION=${MINIO_KMS_AUTO_ENCRYPTION:-on}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - anno-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==========================================================================
+  # Ollama LLM Service (AI Chatbot)
+  # ==========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: anno-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - anno-network
+    # GPU support - uncomment if NVIDIA GPU is available
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  anno-network:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  uploaded_data:
+  ollama_data:

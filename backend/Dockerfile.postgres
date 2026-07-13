@@ -1,0 +1,53 @@
+# Custom PostgreSQL image with PostGIS, pgvector, and pgcrypto
+# Base: postgis/postgis:15-3.3-alpine
+#
+# Encryption at Rest (AC 1) – Volume-Level / TDE notes
+# -----------------------------------------------------
+# For production deployments it is STRONGLY recommended to:
+#   1. Back the ``postgres_data`` Docker volume with a LUKS-encrypted
+#      block device (dm-crypt) so that the raw disk cannot be read without
+#      the LUKS passphrase even if the storage media is stolen.
+#
+#      Quick-start (host, not inside container):
+#        cryptsetup luksFormat /dev/sdX
+#        cryptsetup luksOpen  /dev/sdX postgres-data
+#        mkfs.ext4 /dev/mapper/postgres-data
+#        mount /dev/mapper/postgres-data /var/lib/docker/volumes/calipergt_postgres_data
+#
+#   2. Alternatively, use a managed database service that offers
+#      Transparent Data Encryption (TDE) – e.g.
+#        * AWS RDS PostgreSQL (encryption enabled at cluster creation)
+#        * Google Cloud SQL (CMEK)
+#        * Azure Database for PostgreSQL (service-managed or CMK)
+#
+# pgcrypto is enabled at startup via scripts/init-db.sql and Alembic
+# migration 028, providing gen_random_bytes(), digest(), and pgp_sym_*
+# helpers for any additional server-side crypto operations.
+
+FROM postgis/postgis:15-3.3-alpine
+
+LABEL maintainer="CaliperGT Team"
+LABEL description="PostgreSQL 15 with PostGIS 3.3 and pgvector for RAG"
+
+# Install build dependencies
+RUN apk add --no-cache --virtual .build-deps \
+    git \
+    build-base \
+    clang15 \
+    llvm15-dev
+
+# Clone and build pgvector
+RUN cd /tmp \
+    && git clone --branch v0.7.4 https://github.com/pgvector/pgvector.git \
+    && cd pgvector \
+    && make OPTFLAGS="" \
+    && make install \
+    && cd / \
+    && rm -rf /tmp/pgvector
+
+# Clean up build dependencies to keep image small
+RUN apk del .build-deps
+
+# Verify extensions are available
+RUN postgres --version && \
+    ls -la /usr/local/lib/postgresql/ | grep -E "(postgis|vector)"

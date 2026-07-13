@@ -1,0 +1,471 @@
+# Production Docker Compose for Sensor Fusion Annotation Platform
+# 
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#   
+# With GPU (SAM2):
+#   docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d
+#
+# Requirements:
+#   - Copy .env.production.example to .env and configure all secrets
+#   - Generate SSL certificates or use Let's Encrypt
+#   - Configure proper backup strategy for volumes
+
+version: "3.9"
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+    tag: "{{.Name}}"
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 30s
+
+services:
+  # ==========================================================================
+  # Backend API Service (Production)
+  # ==========================================================================
+  backend:
+    build:
+      context: ./backend
+      target: production
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: calipergt-backend:${VERSION:-latest}
+    container_name: anno-backend
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=10G,mode=1777
+    environment:
+      # Database
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/annotation_platform
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-30}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-50}
+      # -- PostgreSQL TLS (AC 1) --
+      - DB_SSL_MODE=${DB_SSL_MODE:-require}
+      - DB_SSL_CA=${DB_SSL_CA:-/certs/ca.crt}
+      - DB_SSL_CERT=${DB_SSL_CERT:-}
+      - DB_SSL_KEY=${DB_SSL_KEY:-}
+      # Redis – TLS (AC 2) – rediss:// scheme activates TLS in redis-py
+      - REDIS_URL=rediss://:${REDIS_PASSWORD}@redis:6379/0
+      - REDIS_TLS_ENABLED=true
+      - REDIS_TLS_CA=${REDIS_TLS_CA:-/certs/ca.crt}
+      - REDIS_TLS_CERT=${REDIS_TLS_CERT:-}
+      - REDIS_TLS_KEY=${REDIS_TLS_KEY:-}
+      # Security
+      - SECRET_KEY=${SECRET_KEY}
+      - DEBUG=false
+      # CORS
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      # Object Storage – HTTPS endpoint (AC 3)
+      - OBJECT_STORAGE_ENDPOINT=https://minio:9000
+      - OBJECT_STORAGE_ACCESS_KEY=${OBJECT_STORAGE_ACCESS_KEY}
+      - OBJECT_STORAGE_SECRET_KEY=${OBJECT_STORAGE_SECRET_KEY}
+      - OBJECT_STORAGE_BUCKET=${OBJECT_STORAGE_BUCKET:-annotation-data}
+      - OBJECT_STORAGE_PRESIGN_TTL=${OBJECT_STORAGE_PRESIGN_TTL:-900}
+      - MINIO_TLS_CA=${MINIO_TLS_CA:-/certs/ca.crt}
+      - MINIO_TLS_VERIFY=${MINIO_TLS_VERIFY:-true}
+      # SAM2
+      - SAM2_MODE=${SAM2_MODE:-api}
+      - SAM2_API_URL=${SAM2_API_URL:-http://anno-sam2:8001}
+      - GCS_BUCKET=${GCS_BUCKET:-}
+      - GCS_UPLOAD_PREFIX=${GCS_UPLOAD_PREFIX:-}
+      - GCS_SERVICE_ACCOUNT_JSON=${GCS_SERVICE_ACCOUNT_JSON:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcs-key.json
+      # AI Chatbot / LLM
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-mistral:7b-instruct}
+      # Data paths
+      - DATA_ROOT=/data
+      - UPLOAD_ROOT=/uploads
+      # Production settings
+      - WORKERS=${BACKEND_WORKERS:-6}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - TIMEOUT=600
+      - GRACEFUL_TIMEOUT=300
+      # ------------------------------------------------------------------
+      # SSO / OIDC (uncomment and fill in to enable each provider)
+      # Public URL of this backend, used to build the redirect_uri
+      - SSO_REDIRECT_BASE_URL=${SSO_REDIRECT_BASE_URL:-http://localhost:3100}
+      # Public URL of the frontend, used after a successful SSO login
+      - SSO_FRONTEND_URL=${SSO_FRONTEND_URL:-http://localhost:3100}
+      # Default role assigned to auto-provisioned SSO users
+      - SSO_DEFAULT_ROLE=${SSO_DEFAULT_ROLE:-annotator}
+      # Map email domains to orgs: "acme.com:acme-org,example.org:example-org"
+      - SSO_EMAIL_DOMAIN_ORG_MAP=${SSO_EMAIL_DOMAIN_ORG_MAP:-}
+      # Google
+      - SSO_GOOGLE_CLIENT_ID=${SSO_GOOGLE_CLIENT_ID:-}
+      - SSO_GOOGLE_CLIENT_SECRET=${SSO_GOOGLE_CLIENT_SECRET:-}
+      # Azure AD
+      - SSO_AZURE_CLIENT_ID=${SSO_AZURE_CLIENT_ID:-}
+      - SSO_AZURE_CLIENT_SECRET=${SSO_AZURE_CLIENT_SECRET:-}
+      - SSO_AZURE_TENANT_ID=${SSO_AZURE_TENANT_ID:-common}
+      # Okta
+      - SSO_OKTA_CLIENT_ID=${SSO_OKTA_CLIENT_ID:-}
+      - SSO_OKTA_CLIENT_SECRET=${SSO_OKTA_CLIENT_SECRET:-}
+      - SSO_OKTA_DOMAIN=${SSO_OKTA_DOMAIN:-}
+      # Keycloak
+      - SSO_KEYCLOAK_CLIENT_ID=${SSO_KEYCLOAK_CLIENT_ID:-}
+      - SSO_KEYCLOAK_CLIENT_SECRET=${SSO_KEYCLOAK_CLIENT_SECRET:-}
+      - SSO_KEYCLOAK_BASE_URL=${SSO_KEYCLOAK_BASE_URL:-}
+      - SSO_KEYCLOAK_REALM=${SSO_KEYCLOAK_REALM:-}
+      # Encryption at rest – Fernet application-level (AC 3 & 4)
+      - FERNET_ENCRYPTION_KEY=${FERNET_ENCRYPTION_KEY}
+      - FERNET_HMAC_KEY=${FERNET_HMAC_KEY}
+      - FERNET_ENCRYPTION_KEY_PREV=${FERNET_ENCRYPTION_KEY_PREV:-}
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./sample_data:/data:ro
+      - uploaded_data:/uploads
+      # Internal TLS certificates (AC 4 – cert management)
+      - internal_certs:/certs:ro
+      # GCS service account key for auto-annotation sync
+      - ${GCS_KEY_FILE:-/dev/null}:/secrets/gcs-key.json:ro
+    networks:
+      - anno-internal
+      - anno-external
+    logging: *default-logging
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${BACKEND_CPU_LIMIT:-6}"
+          memory: ${BACKEND_MEMORY_LIMIT:-8G}
+        reservations:
+          cpus: "1"
+          memory: 1G
+
+  # ==========================================================================
+  # Frontend with Production Nginx
+  # ==========================================================================
+  frontend:
+    build:
+      context: ./frontend
+      target: production
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+        - BRAND=${BRAND:-caliper}
+    image: calipergt-frontend:${VERSION:-latest}
+    container_name: anno-frontend
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16G,mode=1777
+      - /var/run:size=10M,mode=1777
+      - /tmp:size=50M,mode=1777
+      # Writable dir for the runtime-generated /brand-config.js (rootfs is read-only)
+      - /var/brand:size=1M,mode=1777
+    environment:
+      # Runtime branding via BRAND_* env (set in .env); recreate the container to apply.
+      - BRAND_NAME=${BRAND_NAME:-CaliperGT}
+      - BRAND_COMPANY=${BRAND_COMPANY:-Caliper AI}
+      - BRAND_LOGO=${BRAND_LOGO:-}
+    # Feature toggles from a committed file, selected by FEATURES_FILE in .env.
+    env_file:
+      - ${FEATURES_FILE:-deploy/features/caliper.env}
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      # Custom nginx config for behind reverse proxy
+      - ./frontend/nginx.proxy.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - anno-internal
+      - anno-external
+    logging: *default-logging
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${NGINX_CPU_LIMIT:-2}"
+          memory: ${NGINX_MEMORY_LIMIT:-512M}
+        reservations:
+          cpus: "0.25"
+          memory: 64M
+
+  # ==========================================================================
+  # PostgreSQL Database (Production) with pgvector
+  # ==========================================================================
+  postgres:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.postgres
+    container_name: anno-postgres
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - POSTGRES_DB=annotation_platform
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      # Performance tuning
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    command:
+      - "postgres"
+      - "-c" 
+      - "shared_buffers=${PG_SHARED_BUFFERS:-256MB}"
+      - "-c"
+      - "effective_cache_size=${PG_EFFECTIVE_CACHE:-1GB}"
+      - "-c"
+      - "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}"
+      - "-c"
+      - "work_mem=${PG_WORK_MEM:-16MB}"
+      # -- TLS (AC 1) – require SSL on all client connections --
+      - "-c"
+      - "ssl=on"
+      - "-c"
+      - "ssl_cert_file=/certs/postgres/server.crt"
+      - "-c"
+      - "ssl_key_file=/certs/postgres/server.key"
+      - "-c"
+      - "ssl_ca_file=/certs/ca.crt"
+      - "-c"
+      - "max_connections=${PG_MAX_CONNECTIONS:-200}"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "log_min_duration_statement=${PG_LOG_MIN_DURATION:-1000}"
+      - "-c"
+      - "log_checkpoints=on"
+      - "-c"
+      - "log_connections=on"
+      - "-c"
+      - "log_disconnections=on"
+      - "-c"
+      - "log_lock_waits=on"
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # Backup volume
+      - postgres_backup:/backups
+      # TLS certificates (read-only; key must be chmod 600 before mount)
+      - internal_certs:/certs:ro
+    networks:
+      - anno-internal
+    logging: *default-logging
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "pg_isready -U postgres -d annotation_platform"]
+      interval: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "${PG_CPU_LIMIT:-4}"
+          memory: ${PG_MEMORY_LIMIT:-2G}
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ==========================================================================
+  # Redis Cache (Production)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: anno-redis
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory ${REDIS_MAXMEMORY:-2gb}
+      --maxmemory-policy allkeys-lru
+      --tcp-backlog 511
+      --timeout 0
+      --tcp-keepalive 300
+      --save ""
+      --port 0
+      --tls-port 6379
+      --tls-cert-file /certs/redis/server.crt
+      --tls-key-file /certs/redis/server.key
+      --tls-ca-cert-file /certs/ca.crt
+      --tls-auth-clients no
+    expose:
+      - "6379"
+    volumes:
+      - redis_data:/data
+      - internal_certs:/certs:ro
+    networks:
+      - anno-internal
+    logging: *default-logging
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "redis-cli", "--tls", "-a", "${REDIS_PASSWORD}",
+             "--cacert", "/certs/ca.crt", "ping"]
+      interval: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "${REDIS_CPU_LIMIT:-2}"
+          memory: ${REDIS_MEMORY_LIMIT:-4G}
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ==========================================================================
+  # MinIO Object Storage (Production)
+  # ==========================================================================
+  minio:
+    image: minio/minio:RELEASE.2024-01-01T16-36-33Z
+    container_name: anno-minio
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    # AC 3 – TLS: MinIO reads its server cert from --certs-dir.
+    # Place public.crt and private.key inside that directory.
+    command: server /data --certs-dir /certs/minio --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_BROWSER=${MINIO_BROWSER:-on}
+      - MINIO_PROMETHEUS_AUTH_TYPE=public
+      # SSE-S3 server-side encryption (at-rest, AC 2)
+      - MINIO_KMS_SECRET_KEY=${MINIO_KMS_SECRET_KEY:-}
+      - MINIO_KMS_AUTO_ENCRYPTION=${MINIO_KMS_AUTO_ENCRYPTION:-on}
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - minio_data:/data
+      # Certs dir – MinIO expects public.crt + private.key here
+      - internal_certs:/certs:ro
+    networks:
+      - anno-internal
+    logging: *default-logging
+    healthcheck:
+      <<: *healthcheck-defaults
+      # mc ready local only works for distributed clusters; use a TCP probe instead.
+      # bash /dev/tcp succeeds as long as the TLS port is accepting connections.
+      test: ["CMD", "bash", "-c", "timeout 5 bash -c '</dev/tcp/localhost/9000'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "${MINIO_CPU_LIMIT:-2}"
+          memory: ${MINIO_MEMORY_LIMIT:-1G}
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # ==========================================================================
+  # Ollama LLM Service (AI Chatbot) - CPU Mode
+  # ==========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: anno-ollama
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+    expose:
+      - "11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - anno-internal
+      - anno-external  # Needed for pulling models
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "${OLLAMA_CPU_LIMIT:-8}"
+          memory: ${OLLAMA_MEMORY_LIMIT:-16G}
+        reservations:
+          cpus: "2"
+          memory: 8G
+
+  # ==========================================================================
+  # Backup Service (Optional - runs daily at 2 AM)
+  # ==========================================================================
+  backup:
+    image: postgres:15-alpine
+    container_name: anno-backup
+    restart: "no"
+    profiles: ["backup"]
+    environment:
+      - PGPASSWORD=${POSTGRES_PASSWORD}
+    command: >
+      sh -c 'pg_dump -h postgres -U postgres -d annotation_platform -Fc 
+      -f /backups/backup_$$(date +%Y%m%d_%H%M%S).dump &&
+      find /backups -type f -mtime +${BACKUP_RETENTION_DAYS:-7} -delete'
+    volumes:
+      - postgres_backup:/backups
+    networks:
+      - anno-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+networks:
+  # Internal network - not exposed to host
+  anno-internal:
+    driver: bridge
+    internal: true
+  # External network - only frontend connects here
+  anno-external:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  postgres_backup:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  uploaded_data:
+    driver: local
+  ollama_data:
+    driver: local
+  # Internal TLS certificates shared across postgres / redis / minio / backend.
+  # Populate with scripts/gen_internal_certs.sh before first run.
+  # Marked external so Docker Compose uses the pre-populated volume.
+  internal_certs:
+    external: true
+    name: caliperai-gt_internal_certs

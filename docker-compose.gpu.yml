@@ -1,0 +1,55 @@
+# Docker Compose Override for GPU-enabled SAM2 Service
+# Use with: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+#
+# Requirements:
+# 1. NVIDIA GPU with CUDA support
+# 2. NVIDIA Container Toolkit installed:
+#    https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+# 3. SAM2 model weights downloaded:
+#    python scripts/download_sam2_models.py --size large --output-dir ./models/sam2
+
+services:
+  # ==========================================================================
+  # SAM2 GPU Service - Separate container for ML inference
+  # ==========================================================================
+  sam2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.sam2
+    container_name: anno-sam2
+    restart: unless-stopped
+    shm_size: '4gb'  # Required for PyTorch
+    environment:
+      - SAM2_MODEL_SIZE=${SAM2_MODEL_SIZE:-large}
+      - SAM2_DEVICE=cuda
+      - SAM2_MODEL_DIR=/models/sam2
+      - PYTHONUNBUFFERED=1
+      - PYTORCH_JIT=0  # Disable JIT to avoid segfault in SAM2Transforms
+    ports:
+      - "${SAM2_PORT:-8001}:8001"
+    volumes:
+      - ./models/sam2:/models/sam2:ro  # Model weights
+    networks:
+      - anno-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1  # Use 1 GPU
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 30s
+      retries: 10
+      start_period: 300s  # SAM2 takes time to load on first build
+
+  # Override backend to connect to SAM2 service
+  backend:
+    environment:
+      - SAM2_MODE=api
+      - SAM2_API_URL=http://sam2:8001
+    depends_on:
+      sam2:
+        condition: service_healthy

@@ -1,0 +1,1750 @@
+import { create } from 'zustand';
+import { v4 as uuidv4 } from 'uuid';
+import type { 
+  Annotation, 
+  CuboidData, 
+  Track, 
+  TrackKeyframe, 
+  InterpolatedFrame,
+  AnnotationType,
+  AnnotationSource 
+} from '@/types';
+import { useEditorStore } from './editorStore';
+import { annotationApi } from '@/api/client';
+
+// =============================================================================
+// INTERPOLATION METHODS
+// =============================================================================
+
+export type InterpolationMethod = 'linear' | 'physics' | 'catmull-rom' | 'hybrid' | 'hybrid-snap';
+
+// Current interpolation method (can be changed by user)
+let currentInterpolationMethod: InterpolationMethod = 'hybrid-snap';
+
+export const setInterpolationMethod = (method: InterpolationMethod) => {
+  currentInterpolationMethod = method;
+};
+
+export const getInterpolationMethod = () => currentInterpolationMethod;
+
+// =============================================================================
+// BASIC INTERPOLATION UTILITIES
+// =============================================================================
+
+/**
+ * Linear interpolation between two numbers
+ */
+const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+
+/**
+ * Clamp a value between min and max
+ */
+const clamp = (value: number, min: number, max: number): number => 
+  Math.max(min, Math.min(max, value));
+
+/**
+ * Interpolate angle (handles wrap-around for yaw)
+ */
+const lerpAngle = (a: number, b: number, t: number): number => {
+  // Normalize angles to [-PI, PI]
+  let delta = ((b - a + Math.PI) % (2 * Math.PI)) - Math.PI;
+  if (delta < -Math.PI) delta += 2 * Math.PI;
+  return a + delta * t;
+};
+
+/**
+ * Catmull-Rom spline interpolation for angles (handles wrap-around)
+ */
+const catmullRomAngle = (p0: number, p1: number, p2: number, p3: number, t: number): number => {
+  // Normalize all angles relative to p1
+  const normalize = (angle: number, ref: number): number => {
+    let delta = ((angle - ref + Math.PI) % (2 * Math.PI)) - Math.PI;
+    if (delta < -Math.PI) delta += 2 * Math.PI;
+    return ref + delta;
+  };
+  
+  const n0 = normalize(p0, p1);
+  const n2 = normalize(p2, p1);
+  const n3 = normalize(p3, n2); // normalize p3 relative to normalized p2
+  
+  return catmullRom(n0, p1, n2, n3, t);
+};
+
+// =============================================================================
+// CATMULL-ROM SPLINE INTERPOLATION
+// =============================================================================
+
+/**
+ * Catmull-Rom spline interpolation
+ * Provides smooth C1-continuous curves through control points
+ * 
+ * @param p0 - Control point before the segment start
+ * @param p1 - Segment start point
+ * @param p2 - Segment end point  
+ * @param p3 - Control point after the segment end
+ * @param t - Parameter [0, 1] within the segment
+ * @returns Interpolated value
+ */
+const catmullRom = (p0: number, p1: number, p2: number, p3: number, t: number): number => {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  
+  // Catmull-Rom basis matrix coefficients
+  return 0.5 * (
+    (2 * p1) +
+    (-p0 + p2) * t +
+    (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+    (-p0 + 3 * p1 - 3 * p2 + p3) * t3
+  );
+};
+
+/**
+ * Calculate velocity at a point on a Catmull-Rom spline (first derivative)
+ */
+const catmullRomVelocity = (p0: number, p1: number, p2: number, p3: number, t: number): number => {
+  const t2 = t * t;
+  
+  return 0.5 * (
+    (-p0 + p2) +
+    2 * (2 * p0 - 5 * p1 + 4 * p2 - p3) * t +
+    3 * (-p0 + 3 * p1 - 3 * p2 + p3) * t2
+  );
+};
+
+/**
+ * Calculate acceleration at a point on a Catmull-Rom spline (second derivative)
+ */
+const catmullRomAcceleration = (p0: number, p1: number, p2: number, p3: number, t: number): number => {
+  return 0.5 * (
+    2 * (2 * p0 - 5 * p1 + 4 * p2 - p3) +
+    6 * (-p0 + 3 * p1 - 3 * p2 + p3) * t
+  );
+};
+
+// =============================================================================
+// PHYSICS-BASED MOTION MODEL
+// =============================================================================
+
+/**
+ * Estimate velocity between two keyframes
+ */
+const estimateVelocity = (
+  posA: { x: number; y: number; z: number },
+  posB: { x: number; y: number; z: number },
+  deltaTime: number
+): { x: number; y: number; z: number } => {
+  if (deltaTime <= 0) return { x: 0, y: 0, z: 0 };
+  return {
+    x: (posB.x - posA.x) / deltaTime,
+    y: (posB.y - posA.y) / deltaTime,
+    z: (posB.z - posA.z) / deltaTime,
+  };
+};
+
+// estimateAcceleration - reserved for future use with physics-based acceleration
+// const estimateAcceleration = (velA, velB, deltaTime) => { ... }
+
+/**
+ * Physics-based position interpolation using kinematic equations
+ * position(t) = p₀ + v₀*t + 0.5*a*t²
+ */
+const physicsInterpolatePosition = (
+  startPos: { x: number; y: number; z: number },
+  startVel: { x: number; y: number; z: number },
+  acceleration: { x: number; y: number; z: number },
+  t: number // time in seconds from start
+): { x: number; y: number; z: number } => {
+  return {
+    x: startPos.x + startVel.x * t + 0.5 * acceleration.x * t * t,
+    y: startPos.y + startVel.y * t + 0.5 * acceleration.y * t * t,
+    z: startPos.z + startVel.z * t + 0.5 * acceleration.z * t * t,
+  };
+};
+
+// =============================================================================
+// HYBRID INTERPOLATION (Catmull-Rom + Physics)
+// =============================================================================
+
+interface KeyframeWithTime extends TrackKeyframe {
+  timestamp: number; // Time in seconds
+}
+
+/**
+ * Hybrid interpolation combining Catmull-Rom splines with physics constraints
+ * 
+ * Strategy:
+ * - Uses Catmull-Rom for smooth position curves when 4+ keyframes available
+ * - Uses physics model to constrain acceleration to realistic values
+ * - Falls back to physics-based interpolation for sparse keyframes
+ * - Blends both methods based on keyframe density
+ */
+const hybridInterpolateCuboid = (
+  keyframes: KeyframeWithTime[],
+  targetFrameIndex: number,
+  targetTimestamp: number
+): CuboidData => {
+  const sortedKf = [...keyframes].sort((a, b) => a.frame_index - b.frame_index);
+  
+  // Find the surrounding keyframes
+  let kfBefore: KeyframeWithTime | null = null;
+  let kfAfter: KeyframeWithTime | null = null;
+  let kfBeforeBefore: KeyframeWithTime | null = null;
+  let kfAfterAfter: KeyframeWithTime | null = null;
+  
+  for (let i = 0; i < sortedKf.length; i++) {
+    if (sortedKf[i].frame_index <= targetFrameIndex) {
+      kfBeforeBefore = kfBefore;
+      kfBefore = sortedKf[i];
+    }
+    if (sortedKf[i].frame_index > targetFrameIndex && !kfAfter) {
+      kfAfter = sortedKf[i];
+      kfAfterAfter = sortedKf[i + 1] || null;
+    }
+  }
+  
+  if (!kfBefore || !kfAfter) {
+    // Extrapolation case - use physics model
+    if (kfBefore && !kfAfter) {
+      // Beyond last keyframe - not typically used but handle gracefully
+      return kfBefore.data;
+    }
+    if (!kfBefore && kfAfter) {
+      return kfAfter.data;
+    }
+    // No keyframes at all
+    return getDefaultCuboidData();
+  }
+  
+  // Calculate t parameter (0 to 1) between kfBefore and kfAfter
+  const frameRange = kfAfter.frame_index - kfBefore.frame_index;
+  const t = (targetFrameIndex - kfBefore.frame_index) / frameRange;
+  
+  // Time-based t for physics calculations
+  const timeRange = kfAfter.timestamp - kfBefore.timestamp;
+  const targetTime = kfBefore.timestamp + (targetTimestamp - kfBefore.timestamp);
+  const physicsT = timeRange > 0 ? (targetTime - kfBefore.timestamp) : t;
+  
+  // Get centers for interpolation
+  const c0 = kfBeforeBefore?.data.center || kfBefore.data.center;
+  const c1 = kfBefore.data.center;
+  const c2 = kfAfter.data.center;
+  const c3 = kfAfterAfter?.data.center || kfAfter.data.center;
+  
+  // Calculate Catmull-Rom interpolated position
+  const catmullRomPos = {
+    x: catmullRom(c0.x, c1.x, c2.x, c3.x, t),
+    y: catmullRom(c0.y, c1.y, c2.y, c3.y, t),
+    z: catmullRom(c0.z, c1.z, c2.z, c3.z, t),
+  };
+  
+  // Calculate velocity and acceleration from Catmull-Rom spline
+  const splineVelocity = {
+    x: catmullRomVelocity(c0.x, c1.x, c2.x, c3.x, t) / (timeRange || 0.1),
+    y: catmullRomVelocity(c0.y, c1.y, c2.y, c3.y, t) / (timeRange || 0.1),
+    z: catmullRomVelocity(c0.z, c1.z, c2.z, c3.z, t) / (timeRange || 0.1),
+  };
+  
+  const splineAcceleration = {
+    x: catmullRomAcceleration(c0.x, c1.x, c2.x, c3.x, t) / ((timeRange || 0.1) * (timeRange || 0.1)),
+    y: catmullRomAcceleration(c0.y, c1.y, c2.y, c3.y, t) / ((timeRange || 0.1) * (timeRange || 0.1)),
+    z: catmullRomAcceleration(c0.z, c1.z, c2.z, c3.z, t) / ((timeRange || 0.1) * (timeRange || 0.1)),
+  };
+  
+  // Physics constraints - max realistic values for vehicles
+  const MAX_ACCELERATION = 10.0; // m/s² (aggressive braking/acceleration)
+  // MAX_LATERAL_ACCELERATION reserved for future use
+  const MAX_VELOCITY = 50.0; // m/s (~180 km/h)
+  
+  // Check if spline produces physically plausible motion
+  const totalAcceleration = Math.sqrt(
+    splineAcceleration.x ** 2 + 
+    splineAcceleration.y ** 2 + 
+    splineAcceleration.z ** 2
+  );
+  
+  const totalVelocity = Math.sqrt(
+    splineVelocity.x ** 2 + 
+    splineVelocity.y ** 2 + 
+    splineVelocity.z ** 2
+  );
+  
+  // Calculate physics plausibility score (0 = implausible, 1 = fully plausible)
+  const accPlausibility = Math.max(0, 1 - totalAcceleration / (MAX_ACCELERATION * 2));
+  const velPlausibility = Math.max(0, 1 - totalVelocity / (MAX_VELOCITY * 1.5));
+  const physicsScore = Math.min(accPlausibility, velPlausibility);
+  
+  // Calculate physics-based position for blending
+  const avgVelocity = estimateVelocity(c1, c2, timeRange || 0.1);
+  const physicsPos = {
+    x: c1.x + avgVelocity.x * physicsT,
+    y: c1.y + avgVelocity.y * physicsT,
+    z: c1.z + avgVelocity.z * physicsT,
+  };
+  
+  // Blend between Catmull-Rom and physics based on plausibility
+  // Higher physicsScore = more Catmull-Rom influence
+  const blendFactor = clamp(physicsScore, 0.3, 1.0); // Always use at least 30% spline
+  
+  const finalPos = {
+    x: lerp(physicsPos.x, catmullRomPos.x, blendFactor),
+    y: lerp(physicsPos.y, catmullRomPos.y, blendFactor),
+    z: lerp(physicsPos.z, catmullRomPos.z, blendFactor),
+  };
+  
+  // Interpolate dimensions linearly (they don't change much physically)
+  const d1 = kfBefore.data.dimensions || { length: 1, width: 1, height: 1 };
+  const d2 = kfAfter.data.dimensions || { length: 1, width: 1, height: 1 };
+  const dimensions = {
+    length: lerp(d1.length, d2.length, t),
+    width: lerp(d1.width, d2.width, t),
+    height: lerp(d1.height, d2.height, t),
+  };
+  
+  // Interpolate rotation using Catmull-Rom for smoothness
+  const r0 = kfBeforeBefore?.data.rotation || kfBefore.data.rotation || { yaw: 0, pitch: 0, roll: 0 };
+  const r1 = kfBefore.data.rotation || { yaw: 0, pitch: 0, roll: 0 };
+  const r2 = kfAfter.data.rotation || { yaw: 0, pitch: 0, roll: 0 };
+  const r3 = kfAfterAfter?.data.rotation || kfAfter.data.rotation || { yaw: 0, pitch: 0, roll: 0 };
+  
+  const rotation = {
+    yaw: catmullRomAngle(r0.yaw || 0, r1.yaw || 0, r2.yaw || 0, r3.yaw || 0, t),
+    pitch: catmullRom(r0.pitch || 0, r1.pitch || 0, r2.pitch || 0, r3.pitch || 0, t),
+    roll: catmullRom(r0.roll || 0, r1.roll || 0, r2.roll || 0, r3.roll || 0, t),
+  };
+  
+  // Confidence based on interpolation quality
+  // Higher when we have more keyframes and physics is plausible
+  const keyframeDensityBonus = (kfBeforeBefore && kfAfterAfter) ? 0.1 : 0;
+  const confidence = clamp(0.7 + physicsScore * 0.2 + keyframeDensityBonus, 0.5, 0.95);
+  
+  return {
+    center: finalPos,
+    dimensions,
+    rotation,
+    confidence,
+  };
+};
+
+/**
+ * Get default cuboid data
+ */
+const getDefaultCuboidData = (): CuboidData => ({
+  center: { x: 0, y: 0, z: 0 },
+  dimensions: { length: 4, width: 2, height: 1.5 },
+  rotation: { yaw: 0, pitch: 0, roll: 0 },
+  confidence: 0.5,
+});
+
+// =============================================================================
+// POINT CLOUD SNAPPING
+// =============================================================================
+
+interface Point3D {
+  x: number;
+  y: number;
+  z: number;
+}
+
+interface PointCloudData {
+  positions: Float32Array;
+  colors?: Float32Array;
+  intensities?: Float32Array;
+  pointCount: number;
+}
+
+/**
+ * Settings for point cloud snapping behavior
+ */
+export interface PointCloudSnapSettings {
+  enabled: boolean;
+  searchRadiusMultiplier: number;  // How much to expand search region (1.5 = 50% larger)
+  minPointsRequired: number;       // Minimum points to attempt snapping
+  maxIterations: number;           // Max refinement iterations
+  convergenceThreshold: number;    // Stop when adjustment < this (meters)
+  heightAdjustment: boolean;       // Whether to adjust Z position
+  dimensionAdjustment: boolean;    // Whether to adjust box dimensions
+}
+
+let pointCloudSnapSettings: PointCloudSnapSettings = {
+  enabled: true,
+  searchRadiusMultiplier: 1.5,
+  minPointsRequired: 10,
+  maxIterations: 3,
+  convergenceThreshold: 0.05,
+  heightAdjustment: true,
+  dimensionAdjustment: false,  // Conservative by default
+};
+
+export const setPointCloudSnapSettings = (settings: Partial<PointCloudSnapSettings>) => {
+  pointCloudSnapSettings = { ...pointCloudSnapSettings, ...settings };
+};
+
+export const getPointCloudSnapSettings = () => pointCloudSnapSettings;
+
+/**
+ * Check if a point is inside an oriented bounding box
+ */
+const isPointInOrientedBox = (
+  point: Point3D,
+  center: Point3D,
+  dimensions: { length: number; width: number; height: number },
+  yaw: number
+): boolean => {
+  // Transform point to box-local coordinates
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+  const dz = point.z - center.z;
+  
+  // Rotate by -yaw to align with box axes
+  const cosYaw = Math.cos(-yaw);
+  const sinYaw = Math.sin(-yaw);
+  
+  const localX = dx * cosYaw - dy * sinYaw;
+  const localY = dx * sinYaw + dy * cosYaw;
+  const localZ = dz;
+  
+  // Check if within half-dimensions
+  const halfL = dimensions.length / 2;
+  const halfW = dimensions.width / 2;
+  const halfH = dimensions.height / 2;
+  
+  return Math.abs(localX) <= halfL && 
+         Math.abs(localY) <= halfW && 
+         Math.abs(localZ) <= halfH;
+};
+
+/**
+ * Find points within an expanded search region around the box
+ */
+const findPointsNearBox = (
+  pointCloud: PointCloudData,
+  center: Point3D,
+  dimensions: { length: number; width: number; height: number },
+  yaw: number,
+  expansionFactor: number
+): Point3D[] => {
+  const points: Point3D[] = [];
+  const expandedDims = {
+    length: dimensions.length * expansionFactor,
+    width: dimensions.width * expansionFactor,
+    height: dimensions.height * expansionFactor,
+  };
+  
+  for (let i = 0; i < pointCloud.pointCount; i++) {
+    const idx = i * 3;
+    const point = {
+      x: pointCloud.positions[idx],
+      y: pointCloud.positions[idx + 1],
+      z: pointCloud.positions[idx + 2],
+    };
+    
+    if (isPointInOrientedBox(point, center, expandedDims, yaw)) {
+      points.push(point);
+    }
+  }
+  
+  return points;
+};
+
+/**
+ * Calculate the centroid of a point set
+ */
+const calculateCentroid = (points: Point3D[]): Point3D => {
+  if (points.length === 0) return { x: 0, y: 0, z: 0 };
+  
+  let sumX = 0, sumY = 0, sumZ = 0;
+  for (const p of points) {
+    sumX += p.x;
+    sumY += p.y;
+    sumZ += p.z;
+  }
+  
+  return {
+    x: sumX / points.length,
+    y: sumY / points.length,
+    z: sumZ / points.length,
+  };
+};
+
+/**
+ * Filter outlier points using distance from centroid
+ */
+const filterOutliers = (points: Point3D[], stdDevMultiplier: number = 2.0): Point3D[] => {
+  if (points.length < 5) return points;
+  
+  const centroid = calculateCentroid(points);
+  
+  // Calculate distances from centroid
+  const distances = points.map(p => 
+    Math.sqrt((p.x - centroid.x) ** 2 + (p.y - centroid.y) ** 2 + (p.z - centroid.z) ** 2)
+  );
+  
+  // Calculate mean and std dev
+  const meanDist = distances.reduce((a, b) => a + b, 0) / distances.length;
+  const variance = distances.reduce((sum, d) => sum + (d - meanDist) ** 2, 0) / distances.length;
+  const stdDev = Math.sqrt(variance);
+  
+  // Filter points within threshold
+  const threshold = meanDist + stdDevMultiplier * stdDev;
+  return points.filter((_, i) => distances[i] <= threshold);
+};
+
+/**
+ * Estimate bounding box from points (axis-aligned in rotated frame)
+ */
+const estimateBoundingBox = (
+  points: Point3D[],
+  yaw: number
+): { center: Point3D; dimensions: { length: number; width: number; height: number } } | null => {
+  if (points.length < 4) return null;
+  
+  // Transform points to box-local coordinates
+  const cosYaw = Math.cos(-yaw);
+  const sinYaw = Math.sin(-yaw);
+  
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  
+  // First pass - find rough centroid for transformation
+  const centroid = calculateCentroid(points);
+  
+  for (const p of points) {
+    const dx = p.x - centroid.x;
+    const dy = p.y - centroid.y;
+    
+    const localX = dx * cosYaw - dy * sinYaw;
+    const localY = dx * sinYaw + dy * cosYaw;
+    const localZ = p.z;
+    
+    minX = Math.min(minX, localX);
+    maxX = Math.max(maxX, localX);
+    minY = Math.min(minY, localY);
+    maxY = Math.max(maxY, localY);
+    minZ = Math.min(minZ, localZ);
+    maxZ = Math.max(maxZ, localZ);
+  }
+  
+  // Calculate center in local frame
+  const localCenterX = (minX + maxX) / 2;
+  const localCenterY = (minY + maxY) / 2;
+  const centerZ = (minZ + maxZ) / 2;
+  
+  // Transform back to world coordinates
+  const worldCenterX = centroid.x + localCenterX * Math.cos(yaw) - localCenterY * Math.sin(yaw);
+  const worldCenterY = centroid.y + localCenterX * Math.sin(yaw) + localCenterY * Math.cos(yaw);
+  
+  return {
+    center: { x: worldCenterX, y: worldCenterY, z: centerZ },
+    dimensions: {
+      length: maxX - minX,
+      width: maxY - minY,
+      height: maxZ - minZ,
+    },
+  };
+};
+
+/**
+ * Snap interpolated cuboid to point cloud data
+ * 
+ * This function refines an interpolated position by finding actual LiDAR points
+ * that correspond to the object and adjusting the box to better fit them.
+ */
+export const snapCuboidToPointCloud = (
+  interpolatedData: CuboidData,
+  pointCloud: PointCloudData | null,
+  settings: PointCloudSnapSettings = pointCloudSnapSettings
+): { data: CuboidData; pointsUsed: number; adjustmentMade: boolean } => {
+  // If snapping disabled or no point cloud, return original
+  if (!settings.enabled || !pointCloud || pointCloud.pointCount === 0) {
+    return { data: interpolatedData, pointsUsed: 0, adjustmentMade: false };
+  }
+  
+  const center = interpolatedData.center;
+  const dimensions = interpolatedData.dimensions || { length: 4, width: 2, height: 1.5 };
+  const yaw = interpolatedData.rotation?.yaw || 0;
+  
+  // Find points near the interpolated box
+  let nearbyPoints = findPointsNearBox(
+    pointCloud,
+    center,
+    dimensions,
+    yaw,
+    settings.searchRadiusMultiplier
+  );
+  
+  // Not enough points to refine
+  if (nearbyPoints.length < settings.minPointsRequired) {
+    return { 
+      data: { ...interpolatedData, confidence: (interpolatedData.confidence || 0.8) * 0.9 },
+      pointsUsed: nearbyPoints.length,
+      adjustmentMade: false,
+    };
+  }
+  
+  // Filter outliers
+  const filteredPoints = filterOutliers(nearbyPoints, 2.0);
+  
+  if (filteredPoints.length < settings.minPointsRequired) {
+    return {
+      data: interpolatedData,
+      pointsUsed: filteredPoints.length,
+      adjustmentMade: false,
+    };
+  }
+  
+  // Iterative refinement
+  let currentCenter = { ...center };
+  let currentDimensions = { ...dimensions };
+  let totalAdjustment = 0;
+  
+  for (let iter = 0; iter < settings.maxIterations; iter++) {
+    // Re-find points with current estimate
+    const iterPoints = findPointsNearBox(
+      pointCloud,
+      currentCenter,
+      currentDimensions,
+      yaw,
+      1.2 // Smaller expansion for refinement
+    );
+    
+    if (iterPoints.length < settings.minPointsRequired) break;
+    
+    const refinedPoints = filterOutliers(iterPoints, 1.5);
+    if (refinedPoints.length < 4) break;
+    
+    // Estimate bounding box from points
+    const estimated = estimateBoundingBox(refinedPoints, yaw);
+    if (!estimated) break;
+    
+    // Calculate adjustment
+    const dx = estimated.center.x - currentCenter.x;
+    const dy = estimated.center.y - currentCenter.y;
+    const dz = settings.heightAdjustment ? (estimated.center.z - currentCenter.z) : 0;
+    
+    const adjustment = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    totalAdjustment += adjustment;
+    
+    // Apply partial adjustment (smoothing)
+    const smoothingFactor = 0.7; // Don't jump all the way
+    currentCenter.x += dx * smoothingFactor;
+    currentCenter.y += dy * smoothingFactor;
+    if (settings.heightAdjustment) {
+      currentCenter.z += dz * smoothingFactor;
+    }
+    
+    // Optionally adjust dimensions
+    if (settings.dimensionAdjustment) {
+      currentDimensions.length = lerp(currentDimensions.length, estimated.dimensions.length, 0.3);
+      currentDimensions.width = lerp(currentDimensions.width, estimated.dimensions.width, 0.3);
+      currentDimensions.height = lerp(currentDimensions.height, estimated.dimensions.height, 0.3);
+    }
+    
+    // Check convergence
+    if (adjustment < settings.convergenceThreshold) break;
+  }
+  
+  // Calculate confidence based on point density
+  const expectedVolume = dimensions.length * dimensions.width * dimensions.height;
+  const pointDensity = filteredPoints.length / expectedVolume;
+  const densityScore = Math.min(1, pointDensity / 50); // 50 points per m³ = good
+  const adjustmentScore = Math.max(0, 1 - totalAdjustment / 2); // Penalize large adjustments
+  const confidence = 0.7 + 0.25 * densityScore + 0.05 * adjustmentScore;
+  
+  return {
+    data: {
+      center: currentCenter,
+      dimensions: currentDimensions,
+      rotation: interpolatedData.rotation,
+      confidence: Math.min(0.95, confidence),
+    },
+    pointsUsed: filteredPoints.length,
+    adjustmentMade: totalAdjustment > settings.convergenceThreshold,
+  };
+};
+
+// =============================================================================
+// LEGACY LINEAR INTERPOLATION (kept for fallback)
+// =============================================================================
+
+/**
+ * Interpolate cuboid data between two keyframes (legacy linear method)
+ */
+export const interpolateCuboid = (
+  cuboidA: CuboidData,
+  cuboidB: CuboidData,
+  t: number
+): CuboidData => {
+  // Defensive defaults for incomplete data
+  const defaultCenter = { x: 0, y: 0, z: 0 };
+  const defaultDims = { length: 1, width: 1, height: 1 };
+  const defaultRot = { yaw: 0, pitch: 0, roll: 0 };
+  
+  const centerA = cuboidA?.center || defaultCenter;
+  const centerB = cuboidB?.center || defaultCenter;
+  const dimsA = cuboidA?.dimensions || defaultDims;
+  const dimsB = cuboidB?.dimensions || defaultDims;
+  const rotA = cuboidA?.rotation || defaultRot;
+  const rotB = cuboidB?.rotation || defaultRot;
+  
+  return {
+    center: {
+      x: lerp(centerA.x, centerB.x, t),
+      y: lerp(centerA.y, centerB.y, t),
+      z: lerp(centerA.z, centerB.z, t),
+    },
+    dimensions: {
+      length: lerp(dimsA.length, dimsB.length, t),
+      width: lerp(dimsA.width, dimsB.width, t),
+      height: lerp(dimsA.height, dimsB.height, t),
+    },
+    rotation: {
+      yaw: lerpAngle(rotA.yaw || 0, rotB.yaw || 0, t),
+      pitch: lerp(rotA.pitch || 0, rotB.pitch || 0, t),
+      roll: lerp(rotA.roll || 0, rotB.roll || 0, t),
+    },
+    confidence: 1.0, // Interpolated frames have high confidence
+  };
+};
+
+// =============================================================================
+// TRACK STORE
+// =============================================================================
+
+interface TrackState {
+  // Tracks indexed by track ID
+  tracks: Map<string, Track>;
+  
+  // Currently selected track for editing
+  activeTrackId: string | null;
+  
+  // Actions
+  createTrack: (classId: string, attributes?: Record<string, unknown>) => Track;
+  deleteTrack: (trackId: string) => void;
+  getTrack: (trackId: string) => Track | undefined;
+  
+  // Keyframe operations
+  addKeyframe: (trackId: string, frameId: string, annotationId: string) => void;
+  removeKeyframe: (trackId: string, frameId: string) => void;
+  isKeyframe: (trackId: string, frameId: string) => boolean;
+  
+  // Interpolation
+  getInterpolatedFrames: (trackId: string) => InterpolatedFrame[];
+  interpolateTrack: (trackId: string) => Promise<void>;
+  
+  // Propagation - copies box to N subsequent frames
+  propagateTrack: (trackId: string, numFrames: number) => Promise<void>;
+  
+  // Auto-interpolation between adjacent keyframes
+  interpolateBetweenKeyframes: (trackId: string, keyframeA: string, keyframeB: string) => Promise<void>;
+  
+  // Mark frame as keyframe and trigger auto-interpolation with neighbors
+  markAsKeyframeAndInterpolate: (trackId: string, frameId: string, annotationId: string) => Promise<void>;
+  
+  // Merge tracks
+  mergeTracks: (sourceTrackId: string, targetTrackId: string) => void;
+  
+  // Attribute propagation
+  updateTrackAttributes: (trackId: string, attributes: Record<string, unknown>) => void;
+  updateTrackClass: (trackId: string, classId: string) => void;
+  propagateAttributesToAnnotations: (trackId: string) => void;
+  
+  // Track selection
+  setActiveTrack: (trackId: string | null) => void;
+  
+  // Get keyframes for a track
+  getKeyframes: (trackId: string) => TrackKeyframe[];
+  
+  // Get annotation for track at specific frame
+  getTrackAnnotationAtFrame: (trackId: string, frameId: string) => string | undefined;
+  
+  // Add annotation to track
+  addAnnotationToTrack: (trackId: string, frameId: string, annotationId: string, isKeyframe: boolean) => void;
+  
+  // Initialize tracks from annotations
+  initializeTracksFromAnnotations: (annotations: Annotation[]) => void;
+}
+
+export const useTrackStore = create<TrackState>((set, get) => ({
+  tracks: new Map(),
+  activeTrackId: null,
+  
+  createTrack: (classId, attributes = {}) => {
+    // Generate a UUID for the track
+    const trackId = uuidv4();
+    
+    const track: Track = {
+      id: trackId,
+      class_id: classId,
+      attributes,
+      frame_annotations: new Map(),
+      keyframe_ids: new Set(),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    
+    const newTracks = new Map(get().tracks);
+    newTracks.set(track.id, track);
+    set({ tracks: newTracks, activeTrackId: track.id });
+    
+    return track;
+  },
+  
+  deleteTrack: (trackId) => {
+    const newTracks = new Map(get().tracks);
+    newTracks.delete(trackId);
+    set({ 
+      tracks: newTracks,
+      activeTrackId: get().activeTrackId === trackId ? null : get().activeTrackId
+    });
+  },
+  
+  getTrack: (trackId) => {
+    return get().tracks.get(trackId);
+  },
+  
+  addKeyframe: (trackId, frameId, annotationId) => {
+    const track = get().tracks.get(trackId);
+    if (!track) return;
+    
+    const updatedTrack: Track = {
+      ...track,
+      frame_annotations: new Map(track.frame_annotations).set(frameId, annotationId),
+      keyframe_ids: new Set(track.keyframe_ids).add(frameId),
+      updated_at: new Date().toISOString(),
+    };
+    
+    const newTracks = new Map(get().tracks);
+    newTracks.set(trackId, updatedTrack);
+    set({ tracks: newTracks });
+    
+    // Mark the annotation as a keyframe
+    const editorStore = useEditorStore.getState();
+    editorStore.updateAnnotation(annotationId, { 
+      is_keyframe: true,
+      track_id: trackId 
+    });
+  },
+  
+  removeKeyframe: (trackId, frameId) => {
+    const track = get().tracks.get(trackId);
+    if (!track) return;
+    
+    const newKeyframes = new Set(track.keyframe_ids);
+    newKeyframes.delete(frameId);
+    
+    const updatedTrack: Track = {
+      ...track,
+      keyframe_ids: newKeyframes,
+      updated_at: new Date().toISOString(),
+    };
+    
+    const newTracks = new Map(get().tracks);
+    newTracks.set(trackId, updatedTrack);
+    set({ tracks: newTracks });
+    
+    // Update the annotation
+    const annotationId = track.frame_annotations.get(frameId);
+    if (annotationId) {
+      const editorStore = useEditorStore.getState();
+      editorStore.updateAnnotation(annotationId, { is_keyframe: false });
+    }
+  },
+  
+  isKeyframe: (trackId, frameId) => {
+    const track = get().tracks.get(trackId);
+    return track?.keyframe_ids.has(frameId) ?? false;
+  },
+  
+  getKeyframes: (trackId) => {
+    const track = get().tracks.get(trackId);
+    if (!track) {
+      console.warn('[TrackStore] getKeyframes: Track not found:', trackId);
+      return [];
+    }
+    
+    
+    const editorStore = useEditorStore.getState();
+    const frames = editorStore.frames;
+    const annotations = editorStore.annotations;
+    
+    const keyframes: TrackKeyframe[] = [];
+    
+    // Find all keyframe annotations for this track by looking at the annotations themselves
+    // This is more reliable than using track.frame_annotations which may have stale IDs
+    annotations.forEach((annotation, annotationId) => {
+      // Check if this annotation belongs to this track and is a keyframe cuboid
+      if (annotation.track_id !== trackId) return;
+      if (annotation.type !== 'cuboid') return;
+      if (!annotation.is_keyframe) return;
+      
+      const frame = frames.find(f => f.id === annotation.frame_id);
+      if (!frame) {
+        console.warn('[TrackStore] Frame not found for annotation frameId:', annotation.frame_id);
+        return;
+      }
+      
+      keyframes.push({
+        frame_id: annotation.frame_id!,
+        frame_index: frame.frame_index,
+        annotation_id: annotationId,
+        data: annotation.data as CuboidData,
+      });
+    });
+    
+    if (keyframes.length === 0) {
+      console.warn('[TrackStore] No keyframe annotations found for track. Annotations in store:', annotations.size);
+    }
+    
+    // Sort by frame index
+    return keyframes.sort((a, b) => a.frame_index - b.frame_index);
+  },
+  
+  getInterpolatedFrames: (trackId) => {
+    const keyframes = get().getKeyframes(trackId);
+    if (keyframes.length < 2) {
+      console.warn('[TrackStore] Need at least 2 keyframes for interpolation');
+      return [];
+    }
+    
+    const editorStore = useEditorStore.getState();
+    const frames = editorStore.frames;
+    
+    const interpolated: InterpolatedFrame[] = [];
+    
+    // Sort keyframes by frame index
+    const sortedKeyframes = [...keyframes].sort((a, b) => a.frame_index - b.frame_index);
+    
+    // Get timestamps for keyframes (use frame index * 0.1s as fallback)
+    const getTimestamp = (frameIndex: number): number => {
+      // Try to get timestamp from frames array
+      const frame = frames.find(f => f.frame_index === frameIndex);
+      if (frame?.timestamp) {
+        return typeof frame.timestamp === 'number' ? frame.timestamp : frameIndex * 0.1;
+      }
+      // Fallback: assume 10 Hz (0.1 second per frame)
+      return frameIndex * 0.1;
+    };
+    
+    // Add timestamps to keyframes for hybrid interpolation
+    const keyframesWithTime: KeyframeWithTime[] = sortedKeyframes.map(kf => ({
+      ...kf,
+      timestamp: getTimestamp(kf.frame_index),
+    }));
+    
+    // Determine which interpolation method to use
+    const method = currentInterpolationMethod;
+    
+    console.log(`[TrackStore] Using ${method} interpolation for track ${trackId.slice(0, 8)}...`);
+    
+    // Find all frames that need interpolation (between first and last keyframe)
+    const firstKfIndex = sortedKeyframes[0].frame_index;
+    const lastKfIndex = sortedKeyframes[sortedKeyframes.length - 1].frame_index;
+    
+    const framesToInterpolate = frames.filter(
+      f => f.frame_index > firstKfIndex && f.frame_index < lastKfIndex
+    );
+    
+    // Skip frames that are already keyframes
+    const keyframeIndices = new Set(sortedKeyframes.map(kf => kf.frame_index));
+    
+    framesToInterpolate.forEach((frame) => {
+      if (keyframeIndices.has(frame.frame_index)) return;
+      
+      const targetTimestamp = getTimestamp(frame.frame_index);
+      
+      let interpolatedData: CuboidData;
+      
+      switch (method) {
+        case 'hybrid-snap':
+        case 'hybrid':
+        case 'catmull-rom':
+          // Use hybrid/Catmull-Rom interpolation with all keyframes
+          interpolatedData = hybridInterpolateCuboid(
+            keyframesWithTime,
+            frame.frame_index,
+            targetTimestamp
+          );
+          // Note: Point cloud snapping will be applied in interpolateTrack
+          // when we have access to the actual point cloud data
+          break;
+          
+        case 'physics': {
+          // Use physics-based interpolation
+          // Find surrounding keyframes
+          let kfBefore = sortedKeyframes[0];
+          let kfAfter = sortedKeyframes[sortedKeyframes.length - 1];
+          
+          for (let i = 0; i < sortedKeyframes.length - 1; i++) {
+            if (sortedKeyframes[i].frame_index <= frame.frame_index &&
+                sortedKeyframes[i + 1].frame_index > frame.frame_index) {
+              kfBefore = sortedKeyframes[i];
+              kfAfter = sortedKeyframes[i + 1];
+              break;
+            }
+          }
+          
+          const timeA = getTimestamp(kfBefore.frame_index);
+          const timeB = getTimestamp(kfAfter.frame_index);
+          const deltaTime = timeB - timeA;
+          const elapsed = targetTimestamp - timeA;
+          
+          const velocity = estimateVelocity(
+            kfBefore.data.center,
+            kfAfter.data.center,
+            deltaTime
+          );
+          
+          const physicsCenter = physicsInterpolatePosition(
+            kfBefore.data.center,
+            velocity,
+            { x: 0, y: 0, z: 0 }, // Assume constant velocity
+            elapsed
+          );
+          
+          const t = deltaTime > 0 ? elapsed / deltaTime : 0;
+          
+          interpolatedData = {
+            center: physicsCenter,
+            dimensions: {
+              length: lerp(kfBefore.data.dimensions?.length || 4, kfAfter.data.dimensions?.length || 4, t),
+              width: lerp(kfBefore.data.dimensions?.width || 2, kfAfter.data.dimensions?.width || 2, t),
+              height: lerp(kfBefore.data.dimensions?.height || 1.5, kfAfter.data.dimensions?.height || 1.5, t),
+            },
+            rotation: {
+              yaw: lerpAngle(kfBefore.data.rotation?.yaw || 0, kfAfter.data.rotation?.yaw || 0, t),
+              pitch: lerp(kfBefore.data.rotation?.pitch || 0, kfAfter.data.rotation?.pitch || 0, t),
+              roll: lerp(kfBefore.data.rotation?.roll || 0, kfAfter.data.rotation?.roll || 0, t),
+            },
+            confidence: 0.85,
+          };
+          break;
+        }
+          
+        case 'linear':
+        default: {
+          // Legacy linear interpolation between adjacent keyframes
+          let kfBefore = sortedKeyframes[0];
+          let kfAfter = sortedKeyframes[sortedKeyframes.length - 1];
+          
+          for (let i = 0; i < sortedKeyframes.length - 1; i++) {
+            if (sortedKeyframes[i].frame_index <= frame.frame_index &&
+                sortedKeyframes[i + 1].frame_index > frame.frame_index) {
+              kfBefore = sortedKeyframes[i];
+              kfAfter = sortedKeyframes[i + 1];
+              break;
+            }
+          }
+          
+          const frameRange = kfAfter.frame_index - kfBefore.frame_index;
+          const t = frameRange > 0 ? (frame.frame_index - kfBefore.frame_index) / frameRange : 0;
+          
+          interpolatedData = interpolateCuboid(kfBefore.data, kfAfter.data, t);
+          break;
+        }
+      }
+      
+      interpolated.push({
+        frame_id: frame.id,
+        frame_index: frame.frame_index,
+        data: interpolatedData,
+        is_keyframe: false,
+      });
+    });
+    
+    console.log(`[TrackStore] Generated ${interpolated.length} interpolated frames using ${method} method`);
+    
+    return interpolated;
+  },
+  
+  interpolateTrack: async (trackId) => {
+    const track = get().tracks.get(trackId);
+    if (!track) {
+      console.warn('[TrackStore] interpolateTrack: Track not found:', trackId);
+      return;
+    }
+    
+    // Load all annotations for this track from the API
+    const taskId = useEditorStore.getState().task?.id;
+    if (!taskId) {
+      console.warn('[TrackStore] interpolateTrack: No task ID');
+      return;
+    }
+    
+    try {
+      // Fetch all annotations for this track across all frames using the track endpoint
+      const trackAnnotations = await annotationApi.getTrack(trackId).catch((e) => {
+        console.error('[TrackStore] Failed to fetch track annotations:', e);
+        return [];
+      });
+      
+      console.log('[TrackStore] Fetched track annotations:', trackAnnotations.length, trackAnnotations);
+      
+      if (trackAnnotations.length === 0) {
+        console.warn('[TrackStore] No annotations found for track:', trackId);
+        return;
+      }
+      
+      // Build keyframes directly from the fetched annotations
+      const frames = useEditorStore.getState().frames;
+      const keyframes: TrackKeyframe[] = [];
+      
+      trackAnnotations.forEach((annotation) => {
+        if (annotation.type !== 'cuboid') return;
+        if (!annotation.is_keyframe) return;
+        
+        const frame = frames.find(f => f.id === annotation.frame_id);
+        if (!frame) {
+          console.warn('[TrackStore] Frame not found for annotation frameId:', annotation.frame_id);
+          return;
+        }
+        
+        keyframes.push({
+          frame_id: annotation.frame_id!,
+          frame_index: frame.frame_index,
+          annotation_id: annotation.id,
+          data: annotation.data as CuboidData,
+        });
+      });
+      
+      keyframes.sort((a, b) => a.frame_index - b.frame_index);
+      console.log('[TrackStore] Found keyframes:', keyframes.length, keyframes);
+      
+      if (keyframes.length < 2) {
+        console.warn('[TrackStore] Need at least 2 keyframes for interpolation. Found:', keyframes.length);
+        return;
+      }
+      
+      // Calculate interpolated frames directly
+      const interpolatedFrames: InterpolatedFrame[] = [];
+      
+      for (let i = 0; i < keyframes.length - 1; i++) {
+        const startKf = keyframes[i];
+        const endKf = keyframes[i + 1];
+        
+        // Find all frames between these keyframes
+        for (const frame of frames) {
+          if (frame.frame_index > startKf.frame_index && frame.frame_index < endKf.frame_index) {
+            const t = (frame.frame_index - startKf.frame_index) / (endKf.frame_index - startKf.frame_index);
+            
+            // Interpolate cuboid data
+            const interpolatedData = interpolateCuboid(startKf.data, endKf.data, t);
+            
+            interpolatedFrames.push({
+              frame_id: frame.id,
+              frame_index: frame.frame_index,
+              data: interpolatedData,
+              is_keyframe: false,
+            });
+          }
+        }
+      }
+      
+      console.log('[TrackStore] Interpolated frames:', interpolatedFrames.length);
+      
+      if (interpolatedFrames.length === 0) {
+        console.warn('[TrackStore] No frames to interpolate. Need 2+ keyframes with frames between them.');
+        return;
+      }
+      
+      // Also update the store with track annotations so other code can see them
+      useEditorStore.getState().setAnnotations(trackAnnotations);
+      
+      // Create annotations for interpolated frames
+      const editorStore = useEditorStore.getState();
+      interpolatedFrames.forEach((interpolatedFrame) => {
+        const currentTrack = get().tracks.get(trackId);
+        if (!currentTrack) return;
+        
+        // Check if annotation already exists for this frame
+        const existingAnnotationId = currentTrack.frame_annotations.get(interpolatedFrame.frame_id);
+        
+        if (existingAnnotationId) {
+          // Check if existing annotation is a keyframe - if so, skip it
+          const existingAnnotation = editorStore.annotations.get(existingAnnotationId);
+          if (existingAnnotation?.is_keyframe) {
+            return; // Don't overwrite keyframes
+          }
+          
+          // Update existing non-keyframe annotation
+          editorStore.updateAnnotation(existingAnnotationId, {
+            data: interpolatedFrame.data,
+            source: 'auto_interpolated' as AnnotationSource,
+            is_keyframe: false,
+          });
+        } else {
+          // Create new annotation with the specific frame_id
+          const annotation = editorStore.createAnnotation({
+            type: 'cuboid' as AnnotationType,
+            class_id: currentTrack.class_id,
+            frame_id: interpolatedFrame.frame_id, // IMPORTANT: specify the target frame
+            data: interpolatedFrame.data,
+            attributes: currentTrack.attributes,
+            track_id: trackId,
+            source: 'auto_interpolated' as AnnotationSource,
+            is_keyframe: false,
+          });
+          
+          // Add to track
+          const updatedTrack: Track = {
+            ...currentTrack,
+            frame_annotations: new Map(currentTrack.frame_annotations).set(
+              interpolatedFrame.frame_id,
+              annotation.id
+            ),
+            updated_at: new Date().toISOString(),
+          };
+          
+          const newTracks = new Map(get().tracks);
+          newTracks.set(trackId, updatedTrack);
+          set({ tracks: newTracks });
+          
+        }
+      });
+    } catch (err) {
+      console.error('[TrackStore] Failed to interpolate track:', err);
+    }
+    
+  },
+
+  // Propagate: Copy current frame's box to N subsequent frames (only source is keyframe)
+  propagateTrack: async (trackId, numFrames) => {
+    console.log('[TrackStore] propagateTrack ENTRY - trackId:', trackId, 'numFrames:', numFrames);
+    console.log('[TrackStore] propagateTrack - All tracks:', Array.from(get().tracks.keys()));
+    
+    const track = get().tracks.get(trackId);
+    if (!track) {
+      console.warn('[TrackStore] propagateTrack: Track not found:', trackId);
+      console.warn('[TrackStore] propagateTrack: Available track IDs:', Array.from(get().tracks.keys()));
+      return;
+    }
+    
+    console.log('[TrackStore] propagateTrack: Found track:', track);
+    
+    const editorStore = useEditorStore.getState();
+    const currentFrame = editorStore.currentFrame;
+    const frames = editorStore.frames;
+    
+    if (!currentFrame) {
+      console.warn('[TrackStore] propagateTrack: No current frame');
+      return;
+    }
+    
+    console.log('[TrackStore] propagateTrack: Current frame ID:', currentFrame.id);
+    console.log('[TrackStore] propagateTrack: Track frame_annotations:', Array.from(track.frame_annotations.entries()));
+    
+    // Get current frame's annotation for this track
+    let currentAnnotationId = track.frame_annotations.get(currentFrame.id);
+    
+    // If not found in track, try to find annotation by track_id and frame_id in annotations
+    if (!currentAnnotationId) {
+      console.log('[TrackStore] propagateTrack: Annotation not in track.frame_annotations, searching in editorStore...');
+      editorStore.annotations.forEach((ann, annId) => {
+        if (ann.track_id === trackId && ann.frame_id === currentFrame.id) {
+          currentAnnotationId = annId;
+          console.log('[TrackStore] propagateTrack: Found annotation in editorStore:', annId);
+        }
+      });
+    }
+    
+    if (!currentAnnotationId) {
+      console.warn('[TrackStore] propagateTrack: No annotation for current frame. Frame ID:', currentFrame.id);
+      return;
+    }
+    
+    const currentAnnotation = editorStore.annotations.get(currentAnnotationId);
+    if (!currentAnnotation || currentAnnotation.type !== 'cuboid') {
+      console.warn('[TrackStore] propagateTrack: Current annotation not found or not cuboid');
+      return;
+    }
+    
+    console.log('[TrackStore] propagateTrack: Found annotation to propagate:', currentAnnotationId);
+    
+    // Find frames after current frame
+    const sortedFrames = [...frames].sort((a, b) => a.frame_index - b.frame_index);
+    const currentFrameIdx = sortedFrames.findIndex(f => f.id === currentFrame.id);
+    
+    if (currentFrameIdx === -1) {
+      console.warn('[TrackStore] propagateTrack: Current frame not in frames list');
+      return;
+    }
+    
+    // Get the next N frames
+    const framesToPropagate = sortedFrames.slice(currentFrameIdx + 1, currentFrameIdx + 1 + numFrames);
+    
+    if (framesToPropagate.length === 0) {
+      console.warn('[TrackStore] propagateTrack: No frames to propagate to');
+      return;
+    }
+    
+    console.log('[TrackStore] Propagating to', framesToPropagate.length, 'frames');
+    
+    // Collect ALL changes to minimize state updates
+    const annotationsToUpdate: Array<{ id: string; updates: Partial<Annotation> }> = [];
+    const annotationsToCreate: Array<Partial<Annotation>> = [];
+    const newFrameAnnotationsMap = new Map(track.frame_annotations);
+    let needsKeyframeUpdate = false;
+    
+    // Check if current frame needs to be marked as keyframe
+    if (!track.keyframe_ids.has(currentFrame.id)) {
+      needsKeyframeUpdate = true;
+      annotationsToUpdate.push({
+        id: currentAnnotationId,
+        updates: { is_keyframe: true }
+      });
+    }
+    
+    // Collect frames that need new annotations vs updates
+    for (const targetFrame of framesToPropagate) {
+      const existingAnnotationId = track.frame_annotations.get(targetFrame.id);
+      
+      if (existingAnnotationId) {
+        // Update existing annotation
+        annotationsToUpdate.push({
+          id: existingAnnotationId,
+          updates: {
+            data: { ...currentAnnotation.data as CuboidData },
+            is_keyframe: false,
+            source: 'propagated' as AnnotationSource,
+          }
+        });
+      } else {
+        // Create new annotation
+        annotationsToCreate.push({
+          type: 'cuboid' as AnnotationType,
+          class_id: track.class_id,
+          frame_id: targetFrame.id,
+          data: { ...currentAnnotation.data as CuboidData },
+          attributes: track.attributes,
+          track_id: trackId,
+          source: 'propagated' as AnnotationSource,
+          is_keyframe: false,
+        });
+      }
+    }
+    
+    console.log('[TrackStore] Will update', annotationsToUpdate.length, 'and create', annotationsToCreate.length, 'annotations');
+    
+    // Apply ALL annotation changes with minimal state updates
+    // 1. Batch update existing annotations (single state update)
+    if (annotationsToUpdate.length > 0) {
+      editorStore.updateAnnotationsBatch(annotationsToUpdate);
+    }
+    
+    // 2. Batch create new annotations (single state update)
+    let createdAnnotations: Annotation[] = [];
+    if (annotationsToCreate.length > 0) {
+      createdAnnotations = editorStore.createAnnotationsBatch(annotationsToCreate);
+      // Add to frame annotations map
+      createdAnnotations.forEach((annotation) => {
+        newFrameAnnotationsMap.set(annotation.frame_id, annotation.id);
+      });
+    }
+    
+    // 3. Single track state update with all changes
+    const newKeyframes = new Set(track.keyframe_ids);
+    if (needsKeyframeUpdate) {
+      newKeyframes.add(currentFrame.id);
+    }
+    
+    const updatedTrack: Track = {
+      ...track,
+      frame_annotations: newFrameAnnotationsMap,
+      keyframe_ids: newKeyframes,
+      updated_at: new Date().toISOString(),
+    };
+    const newTracks = new Map(get().tracks);
+    newTracks.set(trackId, updatedTrack);
+    set({ tracks: newTracks });
+    
+    console.log('[TrackStore] Propagation complete, created', createdAnnotations.length, 'annotations');
+  },
+
+  // Interpolate only between two specific keyframes
+  interpolateBetweenKeyframes: async (trackId, keyframeAId, keyframeBId) => {
+    const track = get().tracks.get(trackId);
+    if (!track) return;
+    
+    const editorStore = useEditorStore.getState();
+    const frames = editorStore.frames;
+    
+    // Get annotations for both keyframes
+    const annotationAId = track.frame_annotations.get(keyframeAId);
+    const annotationBId = track.frame_annotations.get(keyframeBId);
+    
+    if (!annotationAId || !annotationBId) {
+      console.warn('[TrackStore] interpolateBetweenKeyframes: Missing annotations');
+      return;
+    }
+    
+    const annotationA = editorStore.annotations.get(annotationAId);
+    const annotationB = editorStore.annotations.get(annotationBId);
+    
+    if (!annotationA || !annotationB) {
+      console.warn('[TrackStore] interpolateBetweenKeyframes: Annotations not found in store');
+      return;
+    }
+    
+    const frameA = frames.find(f => f.id === keyframeAId);
+    const frameB = frames.find(f => f.id === keyframeBId);
+    
+    if (!frameA || !frameB) {
+      console.warn('[TrackStore] interpolateBetweenKeyframes: Frames not found');
+      return;
+    }
+    
+    // Ensure frameA is before frameB
+    const [startFrame, endFrame] = frameA.frame_index < frameB.frame_index 
+      ? [frameA, frameB] 
+      : [frameB, frameA];
+    const [startAnnotation, endAnnotation] = frameA.frame_index < frameB.frame_index
+      ? [annotationA, annotationB]
+      : [annotationB, annotationA];
+    
+    // Find all frames between the two keyframes
+    const sortedFrames = [...frames].sort((a, b) => a.frame_index - b.frame_index);
+    const framesToInterpolate = sortedFrames.filter(
+      f => f.frame_index > startFrame.frame_index && f.frame_index < endFrame.frame_index
+    );
+    
+    if (framesToInterpolate.length === 0) {
+      console.log('[TrackStore] No frames between keyframes to interpolate');
+      return;
+    }
+    
+    console.log('[TrackStore] Interpolating', framesToInterpolate.length, 'frames between keyframes');
+    
+    // Interpolate each frame
+    for (const frame of framesToInterpolate) {
+      const t = (frame.frame_index - startFrame.frame_index) / (endFrame.frame_index - startFrame.frame_index);
+      const interpolatedData = interpolateCuboid(
+        startAnnotation.data as CuboidData,
+        endAnnotation.data as CuboidData,
+        t
+      );
+      
+      const existingAnnotationId = get().tracks.get(trackId)?.frame_annotations.get(frame.id);
+      
+      if (existingAnnotationId) {
+        // Check if it's a keyframe - don't overwrite keyframes
+        const existingAnnotation = editorStore.annotations.get(existingAnnotationId);
+        if (existingAnnotation?.is_keyframe) {
+          continue; // Skip keyframes
+        }
+        
+        // Update existing annotation
+        editorStore.updateAnnotation(existingAnnotationId, {
+          data: interpolatedData,
+          source: 'auto_interpolated' as AnnotationSource,
+          is_keyframe: false,
+        });
+      } else {
+        // Create new interpolated annotation
+        const currentTrack = get().tracks.get(trackId);
+        if (!currentTrack) continue;
+        
+        const newAnnotation = editorStore.createAnnotation({
+          type: 'cuboid' as AnnotationType,
+          class_id: currentTrack.class_id,
+          frame_id: frame.id,
+          data: interpolatedData,
+          attributes: currentTrack.attributes,
+          track_id: trackId,
+          source: 'auto_interpolated' as AnnotationSource,
+          is_keyframe: false,
+        });
+        
+        const updatedTrack: Track = {
+          ...currentTrack,
+          frame_annotations: new Map(currentTrack.frame_annotations).set(frame.id, newAnnotation.id),
+          updated_at: new Date().toISOString(),
+        };
+        const newTracks = new Map(get().tracks);
+        newTracks.set(trackId, updatedTrack);
+        set({ tracks: newTracks });
+      }
+    }
+  },
+
+  // Mark a frame as keyframe and auto-interpolate with adjacent keyframes
+  markAsKeyframeAndInterpolate: async (trackId, frameId, annotationId) => {
+    const track = get().tracks.get(trackId);
+    if (!track) return;
+    
+    const editorStore = useEditorStore.getState();
+    const frames = editorStore.frames;
+    
+    // Mark as keyframe
+    const updatedTrack: Track = {
+      ...track,
+      keyframe_ids: new Set(track.keyframe_ids).add(frameId),
+      updated_at: new Date().toISOString(),
+    };
+    const newTracks = new Map(get().tracks);
+    newTracks.set(trackId, updatedTrack);
+    set({ tracks: newTracks });
+    
+    editorStore.updateAnnotation(annotationId, { is_keyframe: true });
+    
+    // Find adjacent keyframes
+    const currentFrame = frames.find(f => f.id === frameId);
+    if (!currentFrame) return;
+    
+    const keyframeFrameIndices = Array.from(updatedTrack.keyframe_ids)
+      .map(kfId => {
+        const f = frames.find(fr => fr.id === kfId);
+        return f ? { frameId: kfId, frameIndex: f.frame_index } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => a!.frameIndex - b!.frameIndex) as { frameId: string; frameIndex: number }[];
+    
+    // Find previous and next keyframes
+    const currentKeyframeIdx = keyframeFrameIndices.findIndex(kf => kf.frameId === frameId);
+    const prevKeyframe = currentKeyframeIdx > 0 ? keyframeFrameIndices[currentKeyframeIdx - 1] : null;
+    const nextKeyframe = currentKeyframeIdx < keyframeFrameIndices.length - 1 ? keyframeFrameIndices[currentKeyframeIdx + 1] : null;
+    
+    // Interpolate with previous keyframe
+    if (prevKeyframe) {
+      console.log('[TrackStore] Auto-interpolating with previous keyframe');
+      await get().interpolateBetweenKeyframes(trackId, prevKeyframe.frameId, frameId);
+    }
+    
+    // Interpolate with next keyframe
+    if (nextKeyframe) {
+      console.log('[TrackStore] Auto-interpolating with next keyframe');
+      await get().interpolateBetweenKeyframes(trackId, frameId, nextKeyframe.frameId);
+    }
+  },
+  
+  mergeTracks: (sourceTrackId, targetTrackId) => {
+    const sourceTrack = get().tracks.get(sourceTrackId);
+    const targetTrack = get().tracks.get(targetTrackId);
+    
+    if (!sourceTrack || !targetTrack) return;
+    
+    const editorStore = useEditorStore.getState();
+    
+    // Merge frame_annotations from source into target
+    const mergedFrameAnnotations = new Map(targetTrack.frame_annotations);
+    const mergedKeyframes = new Set(targetTrack.keyframe_ids);
+    
+    sourceTrack.frame_annotations.forEach((annotationId, frameId) => {
+      // If target doesn't have this frame, add it
+      if (!mergedFrameAnnotations.has(frameId)) {
+        mergedFrameAnnotations.set(frameId, annotationId);
+        
+        // Update the annotation's track_id
+        editorStore.updateAnnotation(annotationId, { track_id: targetTrackId });
+        
+        // If it was a keyframe in source, it's a keyframe in target
+        if (sourceTrack.keyframe_ids.has(frameId)) {
+          mergedKeyframes.add(frameId);
+        }
+      }
+    });
+    
+    // Update target track
+    const updatedTargetTrack: Track = {
+      ...targetTrack,
+      frame_annotations: mergedFrameAnnotations,
+      keyframe_ids: mergedKeyframes,
+      updated_at: new Date().toISOString(),
+    };
+    
+    const newTracks = new Map(get().tracks);
+    newTracks.set(targetTrackId, updatedTargetTrack);
+    newTracks.delete(sourceTrackId);
+    
+    set({ 
+      tracks: newTracks,
+      activeTrackId: targetTrackId
+    });
+  },
+  
+  updateTrackAttributes: (trackId, attributes) => {
+    const track = get().tracks.get(trackId);
+    if (!track) return;
+    
+    const updatedTrack: Track = {
+      ...track,
+      attributes: { ...track.attributes, ...attributes },
+      updated_at: new Date().toISOString(),
+    };
+    
+    const newTracks = new Map(get().tracks);
+    newTracks.set(trackId, updatedTrack);
+    set({ tracks: newTracks });
+    
+    // Propagate to all annotations in the track
+    get().propagateAttributesToAnnotations(trackId);
+  },
+  
+  updateTrackClass: (trackId, classId) => {
+    const track = get().tracks.get(trackId);
+    if (!track) return;
+    
+    const updatedTrack: Track = {
+      ...track,
+      class_id: classId,
+      updated_at: new Date().toISOString(),
+    };
+    
+    const newTracks = new Map(get().tracks);
+    newTracks.set(trackId, updatedTrack);
+    set({ tracks: newTracks });
+    
+    // Update class on all annotations in the track
+    const editorStore = useEditorStore.getState();
+    track.frame_annotations.forEach((annotationId) => {
+      editorStore.updateAnnotation(annotationId, { class_id: classId });
+    });
+  },
+  
+  propagateAttributesToAnnotations: (trackId) => {
+    const track = get().tracks.get(trackId);
+    if (!track) return;
+    
+    const editorStore = useEditorStore.getState();
+    
+    // Update attributes on all annotations in the track
+    // Note: This does NOT propagate spatial data (x,y,z, dimensions, rotation)
+    track.frame_annotations.forEach((annotationId) => {
+      editorStore.updateAnnotation(annotationId, { 
+        attributes: track.attributes,
+        class_id: track.class_id
+      });
+    });
+  },
+  
+  setActiveTrack: (trackId) => {
+    set({ activeTrackId: trackId });
+  },
+  
+  getTrackAnnotationAtFrame: (trackId, frameId) => {
+    const track = get().tracks.get(trackId);
+    return track?.frame_annotations.get(frameId);
+  },
+  
+  addAnnotationToTrack: (trackId, frameId, annotationId, isKeyframe) => {
+    const track = get().tracks.get(trackId);
+    if (!track) return;
+    
+    const newFrameAnnotations = new Map(track.frame_annotations);
+    newFrameAnnotations.set(frameId, annotationId);
+    
+    const newKeyframes = new Set(track.keyframe_ids);
+    if (isKeyframe) {
+      newKeyframes.add(frameId);
+    }
+    
+    const updatedTrack: Track = {
+      ...track,
+      frame_annotations: newFrameAnnotations,
+      keyframe_ids: newKeyframes,
+      updated_at: new Date().toISOString(),
+    };
+    
+    const newTracks = new Map(get().tracks);
+    newTracks.set(trackId, updatedTrack);
+    set({ tracks: newTracks });
+    
+    // Update the annotation
+    const editorStore = useEditorStore.getState();
+    editorStore.updateAnnotation(annotationId, { 
+      track_id: trackId,
+      is_keyframe: isKeyframe,
+      class_id: track.class_id,
+      attributes: track.attributes
+    });
+  },
+  
+  initializeTracksFromAnnotations: (annotations) => {
+    const newTracks = new Map<string, Track>();
+    
+    // Group annotations by track_id
+    const annotationsByTrack = new Map<string, Annotation[]>();
+    
+    annotations.forEach((ann) => {
+      if (ann.track_id) {
+        const existing = annotationsByTrack.get(ann.track_id) || [];
+        existing.push(ann);
+        annotationsByTrack.set(ann.track_id, existing);
+      }
+    });
+    
+    // Create tracks from grouped annotations
+    annotationsByTrack.forEach((trackAnnotations, trackId) => {
+      if (trackAnnotations.length === 0) return;
+      
+      const firstAnn = trackAnnotations[0];
+      const frameAnnotations = new Map<string, string>();
+      const keyframeIds = new Set<string>();
+      
+      trackAnnotations.forEach((ann) => {
+        frameAnnotations.set(ann.frame_id, ann.id);
+        if (ann.is_keyframe) {
+          keyframeIds.add(ann.frame_id);
+        }
+      });
+      
+      const track: Track = {
+        id: trackId,
+        class_id: firstAnn.class_id,
+        attributes: firstAnn.attributes,
+        frame_annotations: frameAnnotations,
+        keyframe_ids: keyframeIds,
+        created_at: firstAnn.created_at,
+        updated_at: new Date().toISOString(),
+      };
+      
+      newTracks.set(trackId, track);
+    });
+    
+    set({ tracks: newTracks });
+  },
+}));
+
+// =============================================================================
+// SELECTORS
+// =============================================================================
+
+export const useActiveTrack = () => {
+  const activeTrackId = useTrackStore((s) => s.activeTrackId);
+  const tracks = useTrackStore((s) => s.tracks);
+  return activeTrackId ? tracks.get(activeTrackId) : undefined;
+};
+
+export const useTrackForAnnotation = (annotationId: string) => {
+  const tracks = useTrackStore((s) => s.tracks);
+  const annotation = useEditorStore((s) => s.annotations.get(annotationId));
+  
+  if (!annotation?.track_id) return undefined;
+  return tracks.get(annotation.track_id);
+};
+
+export const useIsKeyframe = (annotationId: string) => {
+  const annotation = useEditorStore((s) => s.annotations.get(annotationId));
+  return annotation?.is_keyframe ?? false;
+};
+
+export const useTracksForCurrentFrame = () => {
+  const currentFrame = useEditorStore((s) => s.currentFrame);
+  const tracks = useTrackStore((s) => s.tracks);
+  
+  if (!currentFrame) return [];
+  
+  const result: { track: Track; annotationId: string; isKeyframe: boolean }[] = [];
+  
+  tracks.forEach((track) => {
+    const annotationId = track.frame_annotations.get(currentFrame.id);
+    if (annotationId) {
+      result.push({
+        track,
+        annotationId,
+        isKeyframe: track.keyframe_ids.has(currentFrame.id),
+      });
+    }
+  });
+  
+  return result;
+};

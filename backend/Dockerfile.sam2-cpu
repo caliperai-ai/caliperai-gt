@@ -1,0 +1,47 @@
+# SAM2 Service Dockerfile - CPU/MPS Version (Mac compatible)
+# Works on: macOS (Apple Silicon via MPS), Linux (CPU), Windows (CPU)
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PyTorch (CPU version - smaller, works everywhere)
+RUN pip install --no-cache-dir \
+    torch \
+    torchvision \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Install SAM2 and dependencies
+RUN pip install --no-cache-dir \
+    git+https://github.com/facebookresearch/sam2.git \
+    opencv-python-headless \
+    pillow \
+    numpy \
+    fastapi \
+    uvicorn[standard] \
+    httpx
+
+# Create model directory
+RUN mkdir -p /models/sam2
+
+# Copy the service
+COPY app/services/sam2_gpu_service.py /app/sam2_service.py
+
+# Expose port
+EXPOSE 8001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Run the service
+CMD ["python", "-m", "uvicorn", "sam2_service:app", "--host", "0.0.0.0", "--port", "8001"]

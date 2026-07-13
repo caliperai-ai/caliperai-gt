@@ -1,0 +1,47 @@
+# Docker Compose Override for SAM2 Service - CPU/MPS Version
+# Use with: docker compose -f docker-compose.yml -f docker-compose.sam2.yml up --build
+#
+# This version runs SAM2 on CPU (or MPS on Apple Silicon Macs)
+# Slower than GPU but works on any machine
+
+services:
+  # ==========================================================================
+  # SAM2 CPU Service - Works on Mac/Linux/Windows without NVIDIA GPU
+  # ==========================================================================
+  sam2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.sam2-cpu
+    container_name: anno-sam2
+    restart: unless-stopped
+    environment:
+      - SAM2_MODEL_SIZE=${SAM2_MODEL_SIZE:-base}  # Use 'base' for faster CPU inference
+      - SAM2_DEVICE=cpu  # CPU mode (Docker doesn't support MPS)
+      - SAM2_MODEL_DIR=/models/sam2
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "${SAM2_PORT:-8001}:8001"
+    volumes:
+      - ./models/sam2:/models/sam2:ro
+    networks:
+      - anno-internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s  # CPU model loading takes longer
+
+  # Override backend to connect to SAM2 service
+  backend:
+    environment:
+      - SAM2_MODE=api
+      - SAM2_API_URL=http://anno-sam2:8001
+    depends_on:
+      sam2:
+        condition: service_healthy
+
+networks:
+  anno-internal:
+    name: calipergt_anno-internal
+    external: true

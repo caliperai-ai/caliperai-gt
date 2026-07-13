@@ -1,0 +1,228 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# celery beat schedule file
+celerybeat-schedule
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.env.local
+.env.*.local
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Branding/white-label build configs must be tracked (the `env/` rule above
+# is for Python virtualenvs and would otherwise ignore them).
+!frontend/env/
+!frontend/env/*.env
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs
+dist/
+build/
+*.local
+
+# Editor directories and files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.idea/
+*.iml
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# TypeScript
+*.tsbuildinfo
+
+# Docker
+.docker/
+
+# Local database files
+*.sqlite
+*.sqlite3
+*.db
+
+# Secrets
+secrets/
+*.pem
+*.key
+# Sample data (large files)
+sample_data/models/
+
+# Data files (do not track large binary/image/pointcloud data)
+*.pcd
+*.jpg
+*.jpeg
+*.zip
+
+# Annotation files (do not track)
+*.txt
+*.json
+annotations/
+annotations_example/
+scene_scene-*/
+calibration.json
+scene-*.zip
+
+# Test and utility scripts (root-level only; backend/tests/ is version-controlled)
+test_*.py
+!backend/tests/test_*.py
+upload_*.py
+upload_*.sh
+
+# add the model weight files to gitignore
+*.h5
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.onnx
+*.tflite
+*.pb
+*.save
+*.model
+
+# TLS certificates – contain private keys, never commit
+certs/
+ssl/
+
+# Lane detection vendor repo (large model weights, has own .git)
+lane_detection_repo/
+gcs-key.json
+
+# Local scene data mounted read-only at /data (DATA_ROOT); runtime-only, not tracked.
+# Docker auto-creates the bind-mount path on `docker compose up`.
+sample_data/
