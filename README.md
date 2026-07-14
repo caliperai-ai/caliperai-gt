@@ -384,23 +384,49 @@ caliperai-gt/
 
 ## Enterprise
 
-The open-source platform is fully functional and self-hostable. **Caliper AI**
-also offers a commercial edition with additional capabilities:
+The open-source platform is fully featured and self-hostable. **CaliperGT
+Enterprise** layers on an **AI auto-annotation engine** and an **enterprise-grade
+security & compliance** stack — so your team hand-labels a fraction of the frames,
+ships ground truth in a fraction of the time, and stays audit-ready.
 
-- **3D LiDAR auto-annotation** — AI-driven automatic labeling of point clouds
-  (3D cuboids and 3D segmentation) with model-in-the-loop pre-labeling
-- **Advanced AI-assisted labeling** — auto/pre-labeling workflows beyond the
-  bundled SAM2 assist
-- **Team operations & analytics** — live team-efficiency monitoring, productivity
-  dashboards, and workforce management
-- **Self-hosted LLM chat** — a private, in-app AI assistant running entirely on
-  your own infrastructure
-- **Managed hosting & scaling** — deployment, upgrades, and operations handled for you
-- **Security & compliance** — audit logging, advanced access controls, and
-  compliance support (the open-source edition already includes SSO/OIDC + RBAC)
-- **Priority support & SLAs**, onboarding, and custom integrations
+### 🤖 AI auto-annotation — stop labeling from scratch
 
-📧 For details or a demo, contact **[info@caliperai.ai](mailto:info@caliperai.ai)**.
+- **3D LiDAR auto-annotation** — automatic **3D cuboids and per-point 3D semantic
+  segmentation** straight from raw point clouds, with **cross-frame object
+  tracking** and consistent track IDs. Annotators review and correct instead of
+  drawing every box, frame by frame.
+- **Highly optimized 2D auto-annotation** — detection, segmentation, and keypoints
+  powered by **foundation models fine-tuned on your domain** (driving, retail,
+  agriculture, industrial…). Far higher accuracy than off-the-shelf models, so the
+  pre-labels are production-usable, not throwaway.
+- **AI lane detection** — automatic lane, curb, and road-marking extraction as
+  clean, Bézier-smoothed polylines — turning hours of manual lane tracing into a
+  quick QA pass.
+- **Active-learning loop** — models continuously retrain on your accepted labels
+  and keep getting sharper on *your* data.
+
+### 🔒 Security & compliance
+
+- **Encryption everywhere** — field-level **PII encryption at rest**, **encrypted
+  object storage (SSE)**, and **mutual TLS** between every internal service.
+- **Compliance-ready** — full **audit logging**, data-retention controls, and
+  support for your **SOC 2 / GDPR / ISO 27001** programs.
+- **Governance & isolation** — advanced role controls, **per-project/tenant data
+  isolation**, and **air-gapped / in-VPC deployment** — nothing leaves your
+  infrastructure. (The open-source edition already includes SSO/OIDC + RBAC.)
+
+### ⚙️ Operations & scale
+
+- **Managed hosting & auto-scaling** — deployment, upgrades, and ops handled for you.
+- **Team operations & analytics** — live throughput, quality, and efficiency
+  dashboards across a distributed annotation workforce.
+- **Self-hosted LLM assistant** — a private, in-app copilot running entirely on
+  your own infrastructure.
+- **Priority support & SLAs**, guided onboarding, and custom integrations / model
+  fine-tuning on your data.
+
+📧 **See the difference on your own data** — contact
+**[info@caliperai.ai](mailto:info@caliperai.ai)** for a demo.
 
 ---
 
