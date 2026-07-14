@@ -37,7 +37,6 @@ from sqlalchemy.orm import relationship, Mapped, mapped_column
 from geoalchemy2 import Geometry
 
 from app.core.database import Base
-from app.core.encrypted_type import EncryptedString, EncryptedJSON
 
 
 
@@ -484,13 +483,10 @@ class User(Base, TimestampMixin):
         primary_key=True,
         default=uuid.uuid4,
     )
-    email: Mapped[str] = mapped_column(EncryptedString(255), nullable=False)
-    email_blind_index: Mapped[str] = mapped_column(
-        String(64), nullable=False
-    )
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    full_name: Mapped[Optional[str]] = mapped_column(EncryptedString(255), nullable=True)
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False)
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -571,8 +567,6 @@ class User(Base, TimestampMixin):
     )
     
     __table_args__ = (
-        UniqueConstraint("email_blind_index", name="uq_users_email_blind_index"),
-        Index("ix_users_email_blind_index", "email_blind_index"),
         Index("ix_users_username", "username"),
         Index("ix_users_role", "role"),
     )
@@ -622,8 +616,8 @@ class UserSSOIdentity(Base, TimestampMixin):
     )
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     provider_subject: Mapped[str] = mapped_column(String(512), nullable=False)
-    provider_email: Mapped[Optional[str]] = mapped_column(EncryptedString(255), nullable=True)
-    provider_claims: Mapped[dict] = mapped_column(EncryptedJSON(), default=dict, nullable=False)
+    provider_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    provider_claims: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

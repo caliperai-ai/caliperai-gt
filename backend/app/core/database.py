@@ -1,5 +1,4 @@
 """Database connection and session management."""
-import ssl
 from typing import AsyncGenerator, Optional
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -20,60 +19,10 @@ class Base(DeclarativeBase):
     pass
 
 
-def _build_pg_ssl_context() -> Optional[ssl.SSLContext]:
-    """Build an SSLContext for asyncpg from settings.DB_SSL_MODE and cert paths.
-
-    Returns None when SSL is disabled or we are using SQLite.
-
-    sslmode mapping (mirrors libpq semantics):
-      disable     → None (no TLS at all)
-      allow       → None (driver falls back to plain when server refuses TLS)
-      prefer      → SSLContext with CERT_NONE  (opportunistic TLS, no cert check)
-      require     → SSLContext with CERT_NONE  (TLS required, server cert unverified)
-      verify-ca   → SSLContext with CERT_REQUIRED + CA  (verify chain, not hostname)
-      verify-full → SSLContext with CERT_REQUIRED + CA + check_hostname=True
-    """
-    mode = settings.DB_SSL_MODE
-    if mode in ("disable", "allow"):
-        return None
-
-    ctx = ssl.create_default_context()
-
-    if mode == "prefer" or mode == "require":
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-    elif mode in ("verify-ca", "verify-full"):
-        if not settings.DB_SSL_CA:
-            raise RuntimeError(
-                f"DB_SSL_MODE={mode!r} requires DB_SSL_CA to be set to the "
-                "path of the CA certificate."
-            )
-        ctx.load_verify_locations(cafile=settings.DB_SSL_CA)
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        ctx.check_hostname = mode == "verify-full"
-
-    else:
-        raise ValueError(f"Unknown DB_SSL_MODE value: {mode!r}")
-
-    if settings.DB_SSL_CERT and settings.DB_SSL_KEY:
-        ctx.load_cert_chain(
-            certfile=settings.DB_SSL_CERT,
-            keyfile=settings.DB_SSL_KEY,
-        )
-
-    return ctx
-
-
 is_sqlite = settings.DATABASE_URL.startswith("sqlite")
 
-_pg_ssl_ctx: Optional[ssl.SSLContext] = None if is_sqlite else _build_pg_ssl_context()
+# Services talk over the internal Docker network in plaintext (no TLS).
 _pg_connect_args: dict = {}
-if not is_sqlite:
-    if _pg_ssl_ctx is not None:
-        _pg_connect_args["ssl"] = _pg_ssl_ctx
-    elif settings.DB_SSL_MODE in ("disable", "allow"):
-        _pg_connect_args["ssl"] = False
 
 if is_sqlite:
     engine = create_async_engine(

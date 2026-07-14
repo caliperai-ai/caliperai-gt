@@ -10,14 +10,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 logger = logging.getLogger(__name__)
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from jose import jwt
 from pydantic import BaseModel, EmailStr, Field
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.encryption import get_encryption_service
 from app.models.models import User, UserRole, Permission, ROLE_PERMISSIONS
 from app.services.rbac_service import (
     get_current_user,
@@ -130,9 +129,8 @@ async def login(
     Authenticate user and return JWT token.
     Accepts username or email in the username field.
     """
-    _enc = get_encryption_service()
     query = select(User).where(
-        (User.email_blind_index == _enc.blind_index(login_data.username))
+        (func.lower(User.email) == login_data.username.lower())
         | (User.username == login_data.username)
     )
     result = await db.execute(query)
@@ -189,7 +187,7 @@ async def login_form(
     OAuth2 compatible login endpoint (accepts form data).
     Username field is treated as email.
     """
-    query = select(User).where(User.email_blind_index == get_encryption_service().blind_index(form_data.username))
+    query = select(User).where(func.lower(User.email) == form_data.username.lower())
     result = await db.execute(query)
     user = result.scalar_one_or_none()
     

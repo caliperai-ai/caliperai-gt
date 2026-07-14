@@ -20,18 +20,6 @@ services:
       - OBJECT_STORAGE_SECRET_KEY=${OBJECT_STORAGE_SECRET_KEY}
       - OBJECT_STORAGE_BUCKET=${OBJECT_STORAGE_BUCKET:-annotation-data}
       - OBJECT_STORAGE_PRESIGN_TTL=${OBJECT_STORAGE_PRESIGN_TTL:-900}
-      # ── Internal-service TLS (disabled by default in dev; set in .env to enable) ──
-      # PostgreSQL TLS
-      - DB_SSL_MODE=${DB_SSL_MODE:-disable}
-      - DB_SSL_CA=${DB_SSL_CA:-}
-      - DB_SSL_CERT=${DB_SSL_CERT:-}
-      - DB_SSL_KEY=${DB_SSL_KEY:-}
-      # Redis TLS
-      - REDIS_TLS_ENABLED=${REDIS_TLS_ENABLED:-false}
-      - REDIS_TLS_CA=${REDIS_TLS_CA:-}
-      # MinIO TLS
-      - MINIO_TLS_CA=${MINIO_TLS_CA:-}
-      - MINIO_TLS_VERIFY=${MINIO_TLS_VERIFY:-true}
       - DATA_ROOT=/data
       - SAM2_MODE=${SAM2_MODE:-mock}
       - SAM2_API_URL=${SAM2_API_URL:-http://sam2:8001}
@@ -63,15 +51,6 @@ services:
       - SSO_KEYCLOAK_CLIENT_SECRET=${SSO_KEYCLOAK_CLIENT_SECRET:-}
       - SSO_KEYCLOAK_BASE_URL=${SSO_KEYCLOAK_BASE_URL:-}
       - SSO_KEYCLOAK_REALM=${SSO_KEYCLOAK_REALM:-}
-      # --------------------------------------------------------------------------
-      # Encryption at rest – application-level Fernet (AC 3 & 4)
-      # Generate keys with:
-      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-      #   python -c "import secrets; print(secrets.token_hex(32))"
-      # Keys are injected from .env / secrets – never hard-coded here.
-      - FERNET_ENCRYPTION_KEY=${FERNET_ENCRYPTION_KEY:-}
-      - FERNET_ENCRYPTION_KEY_PREV=${FERNET_ENCRYPTION_KEY_PREV:-}
-      - FERNET_HMAC_KEY=${FERNET_HMAC_KEY:-}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:
@@ -163,27 +142,16 @@ services:
       retries: 5
 
   # ==========================================================================
-  # MinIO Object Storage   (AC 2 – SSE-S3 server-side encryption)
+  # MinIO Object Storage
   # ==========================================================================
   minio:
     image: minio/minio:latest
     container_name: anno-minio
     restart: unless-stopped
-    # SSE-S3: MinIO encrypts every object with AES-256-GCM using the KMS master
-    # key defined in MINIO_KMS_SECRET_KEY.  Objects at rest on the volume are
-    # opaque ciphertext;  the key lives only in this environment variable (AC 4).
-    #
-    # Key format: "<key-name>:<32-byte-hex-string>"
-    # Generate:   python -c "import secrets; print('minio-sse-key:'+secrets.token_hex(32))"
     command: server /data --console-address ":9001"
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
-      # SSE-S3 – set MINIO_KMS_SECRET_KEY in .env or a Docker secret to enable
-      # built-in KMS and automatic object encryption.  Leave blank to disable.
-      - MINIO_KMS_SECRET_KEY=${MINIO_KMS_SECRET_KEY:-}
-      # Enforce SSE-S3 on every bucket (requires MINIO_KMS_SECRET_KEY to be set)
-      - MINIO_KMS_AUTO_ENCRYPTION=${MINIO_KMS_AUTO_ENCRYPTION:-on}
     ports:
       - "${MINIO_API_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"

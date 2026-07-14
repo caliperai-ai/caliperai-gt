@@ -12,7 +12,6 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.models import User, UserRole, Base
 from app.core.config import settings
-from app.core.encryption import get_encryption_service
 
 
 async def create_admin_user(
@@ -69,7 +68,6 @@ async def create_admin_user(
         
         admin = User(
             email=email,
-            email_blind_index=get_encryption_service().blind_index(email),
             username=username,
             hashed_password=hashed_password,
             full_name=full_name,

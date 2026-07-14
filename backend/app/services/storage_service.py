@@ -7,8 +7,6 @@ Security model
   Admin-level MinIO credentials are **never** sent to the browser.
 * Files are read via **pre-signed GET URLs** (default 15-min TTL) generated
   by the backend.  The browser follows a 307 redirect; no credential exposure.
-* Every bucket has SSE-S3 server-side encryption enforced at the bucket policy
-  level (belt-and-suspenders on top of MinIO's global ``MINIO_KMS_AUTO_ENCRYPTION``).
 * CORS is configured per-bucket so browsers can load images/video directly from
   MinIO after following the redirect.
 
@@ -97,17 +95,6 @@ class StorageService:
     """
 
     def __init__(self) -> None:
-        if settings.MINIO_TLS_CA:
-            tls_verify: bool | str = settings.MINIO_TLS_CA
-        else:
-            tls_verify = settings.MINIO_TLS_VERIFY
-
-        if not settings.MINIO_TLS_VERIFY:
-            log.warning(
-                "MINIO_TLS_VERIFY=False: MinIO server certificate is NOT verified. "
-                "This is insecure outside of local development."
-            )
-
         self._client = boto3.client(
             "s3",
             endpoint_url=settings.OBJECT_STORAGE_ENDPOINT,
@@ -115,7 +102,6 @@ class StorageService:
             aws_secret_access_key=settings.OBJECT_STORAGE_SECRET_KEY,
             config=Config(signature_version="s3v4"),
             region_name="us-east-1",
-            verify=tls_verify,
         )
         self._ttl = settings.OBJECT_STORAGE_PRESIGN_TTL
 
@@ -134,7 +120,6 @@ class StorageService:
         """Create the org bucket if it does not exist (idempotent).
 
         Also enforces:
-        * SSE-S3 default encryption at the bucket level.
         * A CORS rule that allows browsers to GET objects from any allowed
           frontend origin.
 
@@ -158,23 +143,6 @@ class StorageService:
                 pass
             else:
                 raise
-
-        try:
-            self._client.put_bucket_encryption(
-                Bucket=name,
-                ServerSideEncryptionConfiguration={
-                    "Rules": [
-                        {
-                            "ApplyServerSideEncryptionByDefault": {
-                                "SSEAlgorithm": "AES256"
-                            },
-                            "BucketKeyEnabled": True,
-                        }
-                    ]
-                },
-            )
-        except ClientError:
-            log.warning("Could not set bucket encryption for %s (MinIO may not support this via API)", name)
 
         try:
             allowed_origins = settings.CORS_ORIGINS if isinstance(settings.CORS_ORIGINS, list) else [settings.CORS_ORIGINS]
@@ -215,7 +183,6 @@ class StorageService:
             Key=object_key,
             Body=data,
             ContentType=content_type,
-            ServerSideEncryption="AES256",
         )
         return _make_ref(bucket, object_key)
 
@@ -237,7 +204,6 @@ class StorageService:
             object_key,
             ExtraArgs={
                 "ContentType": content_type,
-                "ServerSideEncryption": "AES256",
             },
         )
         log.debug("Uploaded %s → minio:%s/%s", file_path, bucket, object_key)

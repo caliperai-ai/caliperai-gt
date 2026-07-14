@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 
 import httpx
 from redis import asyncio as aioredis
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -309,10 +309,8 @@ async def get_or_create_sso_user(
         user = user_result.scalar_one()
         return user
 
-    from app.core.encryption import get_encryption_service
-    _enc = get_encryption_service()
     user_result = await db.execute(
-        select(User).where(User.email_blind_index == _enc.blind_index(email))
+        select(User).where(func.lower(User.email) == email.lower())
     )
     user = user_result.scalar_one_or_none()
 
@@ -330,7 +328,6 @@ async def get_or_create_sso_user(
         user = User(
             id=uuid.uuid4(),
             email=email,
-            email_blind_index=_enc.blind_index(email),
             username=candidate,
             full_name=name,
             hashed_password="!",

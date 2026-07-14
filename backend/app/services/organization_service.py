@@ -175,10 +175,9 @@ class OrganizationMemberService:
         user_id = data.user_id
         
         if data.email and not user_id:
-            from app.core.encryption import get_encryption_service
             result = await self.db.execute(
                 select(User).where(
-                    User.email_blind_index == get_encryption_service().blind_index(data.email)
+                    func.lower(User.email) == data.email.lower()
                 )
             )
             user = result.scalar_one_or_none()

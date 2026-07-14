@@ -49,30 +49,17 @@ services:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/annotation_platform
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-30}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-50}
-      # -- PostgreSQL TLS (AC 1) --
-      - DB_SSL_MODE=${DB_SSL_MODE:-require}
-      - DB_SSL_CA=${DB_SSL_CA:-/certs/ca.crt}
-      - DB_SSL_CERT=${DB_SSL_CERT:-}
-      - DB_SSL_KEY=${DB_SSL_KEY:-}
-      # Redis – TLS (AC 2) – rediss:// scheme activates TLS in redis-py
-      - REDIS_URL=rediss://:${REDIS_PASSWORD}@redis:6379/0
-      - REDIS_TLS_ENABLED=true
-      - REDIS_TLS_CA=${REDIS_TLS_CA:-/certs/ca.crt}
-      - REDIS_TLS_CERT=${REDIS_TLS_CERT:-}
-      - REDIS_TLS_KEY=${REDIS_TLS_KEY:-}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       # Security
       - SECRET_KEY=${SECRET_KEY}
       - DEBUG=false
       # CORS
       - CORS_ORIGINS=${CORS_ORIGINS}
-      # Object Storage – HTTPS endpoint (AC 3)
-      - OBJECT_STORAGE_ENDPOINT=https://minio:9000
+      - OBJECT_STORAGE_ENDPOINT=http://minio:9000
       - OBJECT_STORAGE_ACCESS_KEY=${OBJECT_STORAGE_ACCESS_KEY}
       - OBJECT_STORAGE_SECRET_KEY=${OBJECT_STORAGE_SECRET_KEY}
       - OBJECT_STORAGE_BUCKET=${OBJECT_STORAGE_BUCKET:-annotation-data}
       - OBJECT_STORAGE_PRESIGN_TTL=${OBJECT_STORAGE_PRESIGN_TTL:-900}
-      - MINIO_TLS_CA=${MINIO_TLS_CA:-/certs/ca.crt}
-      - MINIO_TLS_VERIFY=${MINIO_TLS_VERIFY:-true}
       # SAM2
       - SAM2_MODE=${SAM2_MODE:-api}
       - SAM2_API_URL=${SAM2_API_URL:-http://anno-sam2:8001}
@@ -118,10 +105,6 @@ services:
       - SSO_KEYCLOAK_CLIENT_SECRET=${SSO_KEYCLOAK_CLIENT_SECRET:-}
       - SSO_KEYCLOAK_BASE_URL=${SSO_KEYCLOAK_BASE_URL:-}
       - SSO_KEYCLOAK_REALM=${SSO_KEYCLOAK_REALM:-}
-      # Encryption at rest – Fernet application-level (AC 3 & 4)
-      - FERNET_ENCRYPTION_KEY=${FERNET_ENCRYPTION_KEY}
-      - FERNET_HMAC_KEY=${FERNET_HMAC_KEY}
-      - FERNET_ENCRYPTION_KEY_PREV=${FERNET_ENCRYPTION_KEY_PREV:-}
     expose:
       - "8000"
     depends_on:
@@ -132,8 +115,6 @@ services:
     volumes:
       - ./sample_data:/data:ro
       - uploaded_data:/uploads
-      # Internal TLS certificates (AC 4 – cert management)
-      - internal_certs:/certs:ro
       # GCS service account key for auto-annotation sync
       - ${GCS_KEY_FILE:-/dev/null}:/secrets/gcs-key.json:ro
     networks:
@@ -234,15 +215,6 @@ services:
       - "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}"
       - "-c"
       - "work_mem=${PG_WORK_MEM:-16MB}"
-      # -- TLS (AC 1) – require SSL on all client connections --
-      - "-c"
-      - "ssl=on"
-      - "-c"
-      - "ssl_cert_file=/certs/postgres/server.crt"
-      - "-c"
-      - "ssl_key_file=/certs/postgres/server.key"
-      - "-c"
-      - "ssl_ca_file=/certs/ca.crt"
       - "-c"
       - "max_connections=${PG_MAX_CONNECTIONS:-200}"
       - "-c"
@@ -266,8 +238,6 @@ services:
       - ./backend/scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
       # Backup volume
       - postgres_backup:/backups
-      # TLS certificates (read-only; key must be chmod 600 before mount)
-      - internal_certs:/certs:ro
     networks:
       - anno-internal
     logging: *default-logging
@@ -304,24 +274,17 @@ services:
       --timeout 0
       --tcp-keepalive 300
       --save ""
-      --port 0
-      --tls-port 6379
-      --tls-cert-file /certs/redis/server.crt
-      --tls-key-file /certs/redis/server.key
-      --tls-ca-cert-file /certs/ca.crt
-      --tls-auth-clients no
+      --port 6379
     expose:
       - "6379"
     volumes:
       - redis_data:/data
-      - internal_certs:/certs:ro
     networks:
       - anno-internal
     logging: *default-logging
     healthcheck:
       <<: *healthcheck-defaults
-      test: ["CMD", "redis-cli", "--tls", "-a", "${REDIS_PASSWORD}",
-             "--cacert", "/certs/ca.crt", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
     deploy:
       resources:
@@ -341,24 +304,17 @@ services:
     restart: always
     security_opt:
       - no-new-privileges:true
-    # AC 3 – TLS: MinIO reads its server cert from --certs-dir.
-    # Place public.crt and private.key inside that directory.
-    command: server /data --certs-dir /certs/minio --console-address ":9001"
+    command: server /data --console-address ":9001"
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER}
       - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
       - MINIO_BROWSER=${MINIO_BROWSER:-on}
       - MINIO_PROMETHEUS_AUTH_TYPE=public
-      # SSE-S3 server-side encryption (at-rest, AC 2)
-      - MINIO_KMS_SECRET_KEY=${MINIO_KMS_SECRET_KEY:-}
-      - MINIO_KMS_AUTO_ENCRYPTION=${MINIO_KMS_AUTO_ENCRYPTION:-on}
     expose:
       - "9000"
       - "9001"
     volumes:
       - minio_data:/data
-      # Certs dir – MinIO expects public.crt + private.key here
-      - internal_certs:/certs:ro
     networks:
       - anno-internal
     logging: *default-logging
@@ -463,9 +419,3 @@ volumes:
     driver: local
   ollama_data:
     driver: local
-  # Internal TLS certificates shared across postgres / redis / minio / backend.
-  # Populate with scripts/gen_internal_certs.sh before first run.
-  # Marked external so Docker Compose uses the pre-populated volume.
-  internal_certs:
-    external: true
-    name: caliperai-gt_internal_certs

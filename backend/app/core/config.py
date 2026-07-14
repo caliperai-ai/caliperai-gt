@@ -58,28 +58,6 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
 
-    FERNET_ENCRYPTION_KEY: Optional[str] = None
-
-    FERNET_ENCRYPTION_KEY_PREV: str = ""
-
-    FERNET_HMAC_KEY: Optional[str] = None
-
-
-    DB_SSL_MODE: str = "prefer"
-    DB_SSL_CA: Optional[str] = None
-    DB_SSL_CERT: Optional[str] = None
-    DB_SSL_KEY: Optional[str] = None
-
-    REDIS_TLS_ENABLED: bool = False
-    REDIS_TLS_CA: Optional[str] = None
-    REDIS_TLS_CERT: Optional[str] = None
-    REDIS_TLS_KEY: Optional[str] = None
-
-    MINIO_TLS_CA: Optional[str] = None
-    MINIO_TLS_VERIFY: bool = True
-
-    MINIO_KMS_MASTER_KEY: Optional[str] = None
-
     OBJECT_STORAGE_ENDPOINT: str = "http://minio:9000"
     OBJECT_STORAGE_ACCESS_KEY: str = "minioadmin"
     OBJECT_STORAGE_SECRET_KEY: str = "minioadmin"

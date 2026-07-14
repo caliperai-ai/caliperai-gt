@@ -1,6 +1,5 @@
 """Redis cache for point cloud data - shared across all workers."""
 import hashlib
-import ssl
 import time
 from typing import Optional, Tuple
 from redis import asyncio as aioredis
@@ -14,59 +13,10 @@ settings = get_settings()
 _redis_client: Optional[aioredis.Redis] = None
 
 
-def _build_redis_ssl_context() -> Optional[ssl.SSLContext]:
-    """Build an SSLContext for the Redis TLS connection.
-
-    Returns None when ``REDIS_TLS_ENABLED`` is False.
-
-    When a CA cert path is supplied the server certificate is fully verified.
-    Without a CA cert the connection is encrypted but the server certificate
-    is NOT verified — suitable only for local development with self-signed certs.
-    Set ``REDIS_TLS_CA`` to the CA PEM file to enforce verification in production.
-    """
-    if not settings.REDIS_TLS_ENABLED:
-        return None
-
-    if settings.REDIS_TLS_CA:
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.load_verify_locations(cafile=settings.REDIS_TLS_CA)
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        ctx.check_hostname = True
-    else:
-        logger.warning(
-            "REDIS_TLS_ENABLED=True but REDIS_TLS_CA is not set. "
-            "Server certificate will NOT be verified. Set REDIS_TLS_CA in production."
-        )
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-    if settings.REDIS_TLS_CERT and settings.REDIS_TLS_KEY:
-        ctx.load_cert_chain(
-            certfile=settings.REDIS_TLS_CERT,
-            keyfile=settings.REDIS_TLS_KEY,
-        )
-
-    return ctx
-
-
 async def init_redis():
-    """Initialize Redis connection pool."""
+    """Initialize Redis connection pool (plaintext on the internal network)."""
     global _redis_client
     try:
-        tls_kwargs: dict = {}
-        if settings.REDIS_TLS_ENABLED:
-            tls_kwargs["ssl_ca_certs"] = settings.REDIS_TLS_CA or None
-            tls_kwargs["ssl_cert_reqs"] = "required" if settings.REDIS_TLS_CA else "none"
-            tls_kwargs["ssl_check_hostname"] = bool(settings.REDIS_TLS_CA)
-            if settings.REDIS_TLS_CERT and settings.REDIS_TLS_KEY:
-                tls_kwargs["ssl_certfile"] = settings.REDIS_TLS_CERT
-                tls_kwargs["ssl_keyfile"] = settings.REDIS_TLS_KEY
-            if not settings.REDIS_TLS_CA:
-                logger.warning(
-                    "REDIS_TLS_ENABLED=True but REDIS_TLS_CA is not set. "
-                    "Server certificate will NOT be verified. Set REDIS_TLS_CA in production."
-                )
-
         _redis_client = await aioredis.from_url(
             settings.REDIS_URL,
             encoding="utf-8",
@@ -75,11 +25,9 @@ async def init_redis():
             socket_keepalive=True,
             socket_connect_timeout=5,
             retry_on_timeout=True,
-            **tls_kwargs,
         )
         await _redis_client.ping()
-        tls_status = "TLS" if settings.REDIS_TLS_ENABLED else "plain"
-        logger.info("Redis cache initialized successfully (%s)", tls_status)
+        logger.info("Redis cache initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize Redis: {e}")
         _redis_client = None

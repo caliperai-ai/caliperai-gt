@@ -6,11 +6,10 @@ from uuid import UUID
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.encryption import get_encryption_service
 from app.models.models import User, Permission, UserRole, OrganizationMember, Organization
 from app.schemas.schemas import (
     UserCreate,
@@ -48,10 +47,8 @@ async def create_user(
     - New users will be automatically added to that organization
     - If user already exists (same email or username), they will be added to the organization
     """
-    _enc = get_encryption_service()
-
     existing_user = (await db.execute(
-        select(User).where(User.email_blind_index == _enc.blind_index(user_in.email))
+        select(User).where(func.lower(User.email) == user_in.email.lower())
     )).scalar_one_or_none()
 
     if existing_user is None:
@@ -96,7 +93,6 @@ async def create_user(
     
     user = User(
         email=user_in.email,
-        email_blind_index=_enc.blind_index(user_in.email),
         username=user_in.username,
         hashed_password=hash_password(user_in.password),
         full_name=user_in.full_name,

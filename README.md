@@ -146,7 +146,6 @@ are wired automatically; you mainly set secrets and ports.
 | `SECRET_KEY` | JWT signing secret | **Required, ≥ 32 chars** |
 | `POSTGRES_PASSWORD` | Postgres password | Set before first start |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | MinIO root credentials | Set `OBJECT_STORAGE_ACCESS_KEY`/`OBJECT_STORAGE_SECRET_KEY` to the same values (see `.env.example`) |
-| `MINIO_KMS_AUTO_ENCRYPTION` | MinIO at-rest encryption | Set `off` for local (default `on` needs a KMS key) |
 | `CORS_ORIGINS` | Allowed browser origins | e.g. `http://localhost:3000` |
 | `*_PORT` | Host port mappings | Defaults: FE 3000, API 8000, PG 5432, Redis 6379, MinIO 9000/9001 |
 | `BUILD_TARGET` | `development` or `production` | Dev = hot reload |
@@ -249,24 +248,17 @@ cp .env.production.example .env
 #      DOMAIN=annotate.example.com                    — your public hostname
 #      CORS_ORIGINS=https://annotate.example.com      — your public URL(s)
 
-# 2. Generate the internal service TLS certs and load them into the
-#    external volume the stack mounts (first run only):
-./scripts/gen_internal_certs.sh
-docker volume create caliperai-gt_internal_certs
-docker run --rm -v caliperai-gt_internal_certs:/dest -v "$(pwd)/certs":/src \
-  busybox sh -c "cp -r /src/. /dest/"
-
-# 3. Start the stack
+# 2. Start the stack
 docker compose -f docker-compose.prod.yml up -d
 #    + GPU/SAM2:
 docker compose -f docker-compose.prod.yml -f docker-compose.prod.gpu.yml up -d
 
-# 4. The backend auto-creates the schema on first start. On a FRESH database,
+# 3. The backend auto-creates the schema on first start. On a FRESH database,
 #    stamp that state so future migrations apply cleanly:
 docker compose -f docker-compose.prod.yml exec backend alembic stamp head
 #    (Upgrading an EXISTING deployment instead? Run: alembic upgrade head)
 
-# 5. Create the first admin
+# 4. Create the first admin
 docker compose -f docker-compose.prod.yml exec backend python scripts/create_admin.py
 ```
 

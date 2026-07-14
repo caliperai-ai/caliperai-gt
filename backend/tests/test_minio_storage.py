@@ -19,11 +19,9 @@ Features covered
 
 4. StorageService.ensure_bucket()
    – create_bucket called when bucket does not exist (head_bucket → 404)
-   – SSE-S3 encryption set on new bucket
    – Already-existing bucket: no duplicate create_bucket call
 
 5. StorageService.upload / upload_file
-   – put_object called with ServerSideEncryption="AES256"
    – Returns a valid ``minio:{bucket}/{key}`` reference
    – upload_file calls boto3 upload_file with correct ExtraArgs
 
@@ -126,13 +124,6 @@ class TestCredentialHardening:
 
     def test_object_storage_access_key_wired_in_prod_compose(self):
         assert "OBJECT_STORAGE_ACCESS_KEY" in self._prod
-
-    def test_minio_kms_auto_encryption_on_in_dev(self):
-        """Auto-encryption must default to 'on' after the fix."""
-        assert "MINIO_KMS_AUTO_ENCRYPTION" in self._dev
-
-    def test_minio_sse_key_present_in_dev_compose(self):
-        assert "MINIO_KMS_SECRET_KEY" in self._dev
 
     def test_presign_ttl_wired_in_both_compose_files(self):
         assert "OBJECT_STORAGE_PRESIGN_TTL" in self._dev
@@ -252,14 +243,6 @@ class TestEnsureBucket:
         bucket = svc.ensure_bucket(uuid.uuid4())
         mock_client.create_bucket.assert_called_once_with(Bucket=bucket)
 
-    def test_sets_sse_on_new_bucket(self):
-        mock_client = MagicMock()
-        mock_client.head_bucket.side_effect = _client_error("404")
-        svc = self._make_svc(mock_client)
-        svc.ensure_bucket(uuid.uuid4())
-        call_args = mock_client.put_bucket_encryption.call_args
-        rules = call_args[1]["ServerSideEncryptionConfiguration"]["Rules"]
-        assert rules[0]["ApplyServerSideEncryptionByDefault"]["SSEAlgorithm"] == "AES256"
 
     def test_no_create_when_bucket_exists(self):
         mock_client = MagicMock()
@@ -304,7 +287,7 @@ class TestEnsureBucket:
 # =============================================================================
 
 class TestUpload:
-    """upload() and upload_file() must pass SSE header and return correct ref."""
+    """upload() and upload_file() must return the correct ref."""
 
     def _make_svc(self, mock_client):
         from app.services.storage_service import StorageService, reset_storage_service
@@ -324,13 +307,6 @@ class TestUpload:
         assert ref.startswith("minio:")
         assert "img.jpg" in ref
 
-    def test_upload_bytes_passes_sse_aes256(self):
-        mock_client = MagicMock()
-        svc = self._make_svc(mock_client)
-        svc.upload(uuid.uuid4(), "k/key.pcd", b"data")
-        kwargs = mock_client.put_object.call_args[1]
-        assert kwargs["ServerSideEncryption"] == "AES256"
-
     def test_upload_file_returns_minio_ref(self, tmp_path):
         f = tmp_path / "frame.pcd"
         f.write_bytes(b"PCD DATA")
@@ -339,15 +315,6 @@ class TestUpload:
         org = uuid.uuid4()
         ref = svc.upload_file(org, "datasets/ds1/frame.pcd", f)
         assert ref.startswith("minio:")
-
-    def test_upload_file_passes_sse_aes256(self, tmp_path):
-        f = tmp_path / "img.jpg"
-        f.write_bytes(b"JPEG")
-        mock_client = MagicMock()
-        svc = self._make_svc(mock_client)
-        svc.upload_file(uuid.uuid4(), "key/img.jpg", f)
-        kwargs = mock_client.upload_file.call_args[1]
-        assert kwargs["ExtraArgs"]["ServerSideEncryption"] == "AES256"
 
     def test_upload_file_uses_correct_bucket_and_key(self, tmp_path):
         f = tmp_path / "lidar.pcd"
