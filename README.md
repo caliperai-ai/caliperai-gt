@@ -389,12 +389,22 @@ Enterprise** layers on an **AI auto-annotation engine** and an **enterprise-grad
 security & compliance** stack — so your team hand-labels a fraction of the frames,
 ships ground truth in a fraction of the time, and stays audit-ready.
 
+### ⭐ Flagship
+
+- **VLA (Vision-Language-Action) ground truth** — the tooling to build training
+  data for **vision-language-action and end-to-end driving/robotics foundation
+  models**: natural-language scene descriptions, instruction & reasoning traces,
+  and **action grounding** aligned to synchronized LiDAR + camera. Produce the
+  datasets the next generation of autonomous systems is trained on — not just
+  boxes and masks.
+- **3D LiDAR auto-annotation** — automatic **3D cuboids and per-point segmentation**
+  straight from raw point clouds, with **cross-frame tracking and stable track
+  IDs**. Turn weeks of manual 3D labeling into a fast review-and-correct pass.
+
 ### 🤖 AI auto-annotation — stop labeling from scratch
 
-- **3D LiDAR auto-annotation** — automatic **3D cuboids and per-point 3D semantic
-  segmentation** straight from raw point clouds, with **cross-frame object
-  tracking** and consistent track IDs. Annotators review and correct instead of
-  drawing every box, frame by frame.
+Beyond the flagship 3D LiDAR engine above:
+
 - **Highly optimized 2D auto-annotation** — detection, segmentation, and keypoints
   powered by **foundation models fine-tuned on your domain** (driving, retail,
   agriculture, industrial…). Far higher accuracy than off-the-shelf models, so the
