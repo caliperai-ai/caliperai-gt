@@ -212,6 +212,29 @@ and the platform extracts its frames into a camera-only scene for 2D annotation 
 no bundle needed (requires `ffmpeg` on the backend). See the *Video input* section
 of [`docs/DATA_FORMAT.md`](docs/DATA_FORMAT.md#video-input-extract-frames-from-a-video).
 
+### Try it with demo data
+
+No data of your own yet? Grab a ready-made scene from our **public** demo bucket —
+**no GCS account or credentials needed** (the objects are anonymously readable).
+Each scene is a `.zip`; download it and import via **Dataset → Import**.
+
+```bash
+# 3D semantic segmentation
+curl -L -O "https://storage.googleapis.com/customer-demo-datasets/caliper-gt-demo/3D/3D%20segmentation/Segmentation.zip"
+
+# 3D + camera sensor fusion
+curl -L -O "https://storage.googleapis.com/customer-demo-datasets/caliper-gt-demo/3D/Sensor%20fusion/Sensor_fusion.zip"
+
+# 2D fisheye cameras
+curl -L -O "https://storage.googleapis.com/customer-demo-datasets/caliper-gt-demo/2D/Fisheye/Fisheye_scene_02.zip"
+
+# …or browse every demo scene (public bucket, no auth):
+gsutil ls "gs://customer-demo-datasets/caliper-gt-demo/**/*.zip"
+```
+
+Then create a Campaign → Dataset and **Import** the downloaded `.zip`.
+(`%20` in the URLs just encodes the spaces in the folder names.)
+
 ---
 
 ## AI-Assisted Segmentation (SAM2)
