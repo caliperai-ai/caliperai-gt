@@ -5,9 +5,8 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "postgis";
 CREATE EXTENSION IF NOT EXISTS "btree_gist";
--- pgcrypto: provides gen_random_bytes(), pgp_sym_encrypt(), digest() etc.
--- Used for server-side column encryption (TDE helper) and additional hashing.
--- Application-level Fernet encryption (AC 3) runs before data reaches the DB.
+-- pgcrypto: provides gen_random_uuid() used as a column server-default by an
+-- older migration (built-in on PostgreSQL 13+, but kept for compatibility).
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- Create application database (if not exists)
