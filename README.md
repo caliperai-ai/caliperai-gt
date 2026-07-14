@@ -225,8 +225,8 @@ curl -L -O "https://storage.googleapis.com/customer-demo-datasets/caliper-gt-dem
 # 3D + camera sensor fusion
 curl -L -O "https://storage.googleapis.com/customer-demo-datasets/caliper-gt-demo/3D/Sensor%20fusion/Sensor_fusion.zip"
 
-# 2D fisheye cameras
-curl -L -O "https://storage.googleapis.com/customer-demo-datasets/caliper-gt-demo/2D/Fisheye/Fisheye_scene_02.zip"
+# 2D object detection
+curl -L -O "https://storage.googleapis.com/customer-demo-datasets/caliper-gt-demo/2D/Object_detection.zip"
 
 # …or browse every demo scene (public bucket, no auth):
 gsutil ls "gs://customer-demo-datasets/caliper-gt-demo/**/*.zip"
